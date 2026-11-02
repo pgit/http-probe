@@ -21,7 +21,7 @@
         {
             "name": "dev",
             "displayName": "Debug, against sibling checkouts",
-            "description": "What the crawler is developed with: the two libraries as they are in their checkouts next to this one, whatever the pins say. Keep this tree in build/, clangd reads its compile_commands.json",
+            "description": "What http-probe is developed with: the two libraries as they are in their checkouts next to this one, whatever the pins say. Keep this tree in build/, clangd reads its compile_commands.json",
             "inherits": "base",
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {

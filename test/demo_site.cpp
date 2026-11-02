@@ -16,7 +16,7 @@ int main()
    spdlog::set_level(spdlog::level::err);
 
    boost::asio::io_context context;
-   crawler::test::Site site(context.get_executor());
+   http_probe::test::Site site(context.get_executor());
 
    site.dns().add_https("localhost", 1, ".",
                         {{ARES_SVCB_PARAM_ALPN, {2, 'h', '3'}},
@@ -26,7 +26,7 @@ int main()
 
    site.page("/", {.body = "<p>hello</p>"});
 
-   std::println("crawler --dns-server {} --ca-file {} localhost", site.dns_address(),
+   std::println("http-probe --dns-server {} --ca-file {} localhost", site.dns_address(),
                 site.ca_file().string());
    std::fflush(stdout);
 

@@ -6,7 +6,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-using namespace crawler;
+using namespace http_probe;
 using testing::ElementsAre;
 using testing::HasSubstr;
 using testing::IsEmpty;

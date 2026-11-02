@@ -1,5 +1,5 @@
 //
-// crawler [options] HOST...
+// http-probe [options] HOST...
 //
 #include "prober.hpp"
 
@@ -22,8 +22,8 @@
 namespace
 {
 
-constexpr std::string_view usage = R"(usage: crawler [options] HOST...
-       crawler [options] --file LIST
+constexpr std::string_view usage = R"(usage: http-probe [options] HOST...
+       http-probe [options] --file LIST
 
 Requests https://HOST/ once for each host name and prints the status and header fields of the
 response. How to connect is up to the host's HTTPS records in DNS (RFC 9460). Redirects are reported
@@ -35,9 +35,9 @@ and not followed, and nothing else on the host is requested.
   --timeout-ms N      how long one request may take; default: 10000
 )";
 
-crawler::Config parse_arguments(int argc, char* argv[])
+http_probe::Config parse_arguments(int argc, char* argv[])
 {
-   crawler::Config config;
+   http_probe::Config config;
    for (int i = 1; i < argc; ++i)
    {
       const std::string_view argument = argv[i];
@@ -57,9 +57,9 @@ crawler::Config parse_arguments(int argc, char* argv[])
          if (!list)
             throw std::invalid_argument(std::format("can't read '{}'", value));
          std::vector<std::string> skipped;
-         config.hosts.append_range(crawler::read_hosts(list, skipped));
+         config.hosts.append_range(http_probe::read_hosts(list, skipped));
          for (const auto& line : skipped)
-            std::println(stderr, "crawler: skipping '{}': not a host name", line);
+            std::println(stderr, "http-probe: skipping '{}': not a host name", line);
       }
       else if (argument == "--dns-server")
          config.dns_server = value;
@@ -80,7 +80,7 @@ crawler::Config parse_arguments(int argc, char* argv[])
    return config;
 }
 
-void print(const crawler::Result& result)
+void print(const http_probe::Result& result)
 {
    if (result.error.empty())
       std::println("{}: {} [{}] {} bytes in {}", result.host, result.status, result.route,
@@ -89,7 +89,7 @@ void print(const crawler::Result& result)
       std::println("{}: failed: {}", result.host, result.error);
 
    for (const auto& record : result.records)
-      std::println("  record: {}", crawler::to_text(record));
+      std::println("  record: {}", http_probe::to_text(record));
    for (const auto& note : result.notes)
       std::println("  note: {}", note);
    for (const auto& [name, value] : result.fields)
@@ -103,7 +103,7 @@ int main(int argc, char* argv[])
    spdlog::set_level(spdlog::level::err); // anyhttp logs through the default logger
 
    bool all_answered = true;
-   const auto report = [&](const crawler::Result& result) {
+   const auto report = [&](const http_probe::Result& result) {
       all_answered = all_answered && result.error.empty();
       print(result);
    };
@@ -111,7 +111,7 @@ int main(int argc, char* argv[])
    try
    {
       boost::asio::io_context context;
-      crawler::Prober prober(context.get_executor(), parse_arguments(argc, argv), report);
+      http_probe::Prober prober(context.get_executor(), parse_arguments(argc, argv), report);
       boost::asio::co_spawn(context, prober.run(), [](const std::exception_ptr& ex) {
          if (ex)
             std::rethrow_exception(ex);
@@ -120,12 +120,12 @@ int main(int argc, char* argv[])
    }
    catch (const std::invalid_argument& ex)
    {
-      std::println(stderr, "crawler: {}\n\n{}", ex.what(), usage);
+      std::println(stderr, "http-probe: {}\n\n{}", ex.what(), usage);
       return 2;
    }
    catch (const std::exception& ex)
    {
-      std::println(stderr, "crawler: {}", ex.what());
+      std::println(stderr, "http-probe: {}", ex.what());
       return 1;
    }
 

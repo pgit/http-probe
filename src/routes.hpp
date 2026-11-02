@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-namespace crawler
+namespace http_probe
 {
 
 // =================================================================================================
@@ -62,4 +62,4 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found);
 
 // =================================================================================================
 
-} // namespace crawler
+} // namespace http_probe

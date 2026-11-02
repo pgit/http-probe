@@ -1,7 +1,7 @@
-# crawler
+# http-probe
 
 Requests hosts the way their HTTPS records say, on [anyhttp](https://github.com/pgit/anyhttp) (HTTP) and
-[c-ares-async](https://github.com/pgit/c-ares-async) (DNS). Despite the name, it does not crawl.
+[c-ares-async](https://github.com/pgit/c-ares-async) (DNS).
 
 > [!WARNING]
 > This repository is purely experimental. It is not meant for production use, and anything in it
@@ -11,14 +11,14 @@ Requests hosts the way their HTTPS records say, on [anyhttp](https://github.com/
 ## What it does
 
 ```sh
-crawler example.com www.example.org
-crawler --file hostnames.txt
+http-probe example.com www.example.org
+http-probe --file hostnames.txt
 ```
 
 It requests `https://<host>/` once for each host, in turn, and prints the status, the route, the time
 it took and the header fields of the response, along with the host's HTTPS records. A redirect is
 reported and not followed, and nothing else on the host is requested, `robots.txt` included.
-`crawler` without arguments lists the options. The exit code is 0 if every host answered, whatever
+`http-probe` without arguments lists the options. The exit code is 0 if every host answered, whatever
 the status.
 
 How to connect is up to the host's HTTPS records in DNS ([RFC 9460](https://www.rfc-editor.org/rfc/rfc9460)):

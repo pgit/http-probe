@@ -22,9 +22,9 @@
 #include <utility>
 #include <vector>
 
-using namespace crawler;
+using namespace http_probe;
 using namespace std::chrono_literals;
-using crawler::test::Site;
+using http_probe::test::Site;
 using testing::Contains;
 using testing::ElementsAre;
 using testing::HasSubstr;
@@ -178,7 +178,7 @@ TEST_F(Probe, RequestsTheHostAtThePortOfItsRecord)
 
    ASSERT_EQ(site.requests().size(), 1u);
    EXPECT_EQ(site.requests()[0].authority, "localhost") << "the host, not where it went";
-   EXPECT_THAT(site.requests()[0].user_agent, HasSubstr("crawler/"));
+   EXPECT_THAT(site.requests()[0].user_agent, HasSubstr("http-probe/"));
 }
 
 TEST_F(Probe, RequestsNothingButTheRoot)

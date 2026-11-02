@@ -1,8 +1,8 @@
-# Working on the crawler
+# Working on http-probe
 
-Despite the name it does not crawl: it requests `https://<host>/` once per host and reports what
-came back, connecting the way the host's HTTPS records say. It is built on two libraries of the same
-author, each in a repository of its own: anyhttp for HTTP and c-ares-async for DNS.
+It requests `https://<host>/` once per host and reports what came back, connecting the way the
+host's HTTPS records say. It is built on two libraries of the same author, each in a repository of
+its own: anyhttp for HTTP and c-ares-async for DNS.
 [README.md](README.md) has the presets and the build commands.
 
 ## Safety rules
@@ -27,9 +27,9 @@ any I/O, and [prober.cpp](src/prober.cpp) does the rest. The tests in [test/](te
 ## The libraries
 
 - Changes to a library belong in that library's repository and session, with a test in its suite.
-  Do not work around a library bug in crawler code: get it fixed there, then move the pin.
+  Do not work around a library bug in this code: get it fixed there, then move the pin.
 - Moving a pin in [CMakeLists.txt](CMakeLists.txt) is a commit of its own. CI builds from the pins
-  only, so a crawler change that needs a library change has to wait for that change to be pushed.
+  only, so a change here that needs a library change has to wait for that change to be pushed.
 - The `dev` preset builds the sibling checkouts as they are, on whatever branch they are on, and can
   differ from the pins. Check with the `pinned` preset before committing.
 - Everything in one process has to agree on the standard library, the TLS library and the I/O

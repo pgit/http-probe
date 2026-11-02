@@ -17,7 +17,7 @@
 
 namespace http = boost::beast::http;
 
-namespace crawler
+namespace http_probe
 {
 
 namespace
@@ -25,7 +25,7 @@ namespace
 
 // =================================================================================================
 
-constexpr std::string_view user_agent = "crawler/0.0.1 (+https://github.com/pgit/crawler)";
+constexpr std::string_view user_agent = "http-probe/0.0.1 (+https://github.com/pgit/http-probe)";
 
 constexpr int max_alias_chain = 8;
 
@@ -251,4 +251,4 @@ anyhttp::Task<Prober::Response> Prober::attempt(const Route& route, const std::s
 
 // =================================================================================================
 
-} // namespace crawler
+} // namespace http_probe

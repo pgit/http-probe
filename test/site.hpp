@@ -1,5 +1,5 @@
 //
-// A web site with DNS of its own, all on loopback, for a crawler to be pointed at: an anyhttp
+// A web site with DNS of its own, all on loopback, for the program to be pointed at: an anyhttp
 // server on one port, for every protocol, and a DNS server with whatever zone the test wants. The
 // server has a certificate for "localhost", the one name that also resolves without our DNS server,
 // which anyhttp's own resolver needs for HTTP/3.
@@ -20,7 +20,7 @@
 #include <string_view>
 #include <vector>
 
-namespace crawler::test
+namespace http_probe::test
 {
 
 // =================================================================================================
@@ -82,4 +82,4 @@ private:
 
 // =================================================================================================
 
-} // namespace crawler::test
+} // namespace http_probe::test

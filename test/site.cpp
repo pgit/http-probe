@@ -12,14 +12,14 @@
 
 namespace http = boost::beast::http;
 
-namespace crawler::test
+namespace http_probe::test
 {
 
 // =================================================================================================
 
 Site::Site(const anyhttp::Executor& executor) : requests_(std::make_shared<std::vector<Request>>())
 {
-   auto directory = (std::filesystem::temp_directory_path() / "crawler-test-XXXXXX").string();
+   auto directory = (std::filesystem::temp_directory_path() / "http-probe-test-XXXXXX").string();
    if (!mkdtemp(directory.data()))
       throw std::runtime_error("mkdtemp");
    directory_ = directory;
@@ -102,4 +102,4 @@ void Site::stop()
 
 // =================================================================================================
 
-} // namespace crawler::test
+} // namespace http_probe::test

@@ -7,7 +7,7 @@
 #include <format>
 #include <ranges>
 
-namespace crawler
+namespace http_probe
 {
 
 namespace
@@ -157,4 +157,4 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found)
 
 // =================================================================================================
 
-} // namespace crawler
+} // namespace http_probe
