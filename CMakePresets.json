@@ -1,0 +1,74 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 30,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "description": "clang, named explicitly because cc and c++ are GCC on this host; CMakeLists.txt takes care of libc++ and /opt/libc++",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "dev",
+            "displayName": "Debug, against sibling checkouts",
+            "description": "What the crawler is developed with: the two libraries as they are in their checkouts next to this one, whatever the pins say. Keep this tree in build/, clangd reads its compile_commands.json",
+            "inherits": "base",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "FETCHCONTENT_SOURCE_DIR_ANYHTTP": "${sourceDir}/../anyhttp",
+                "FETCHCONTENT_SOURCE_DIR_C_ARES_ASYNC": "${sourceDir}/../c-ares-async"
+            }
+        },
+        {
+            "name": "pinned",
+            "displayName": "Debug, from the pins",
+            "description": "The libraries at the commits CMakeLists.txt pins, fetched from GitHub: what CI builds",
+            "inherits": "base",
+            "binaryDir": "${sourceDir}/build-pinned"
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "dev",
+            "configurePreset": "dev"
+        },
+        {
+            "name": "pinned",
+            "configurePreset": "pinned"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "description": "A test takes well under 5 seconds; one that takes longer is hanging",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "timeout": 5,
+                "noTestsAction": "error"
+            }
+        },
+        {
+            "name": "dev",
+            "configurePreset": "dev",
+            "inherits": "base"
+        },
+        {
+            "name": "pinned",
+            "configurePreset": "pinned",
+            "inherits": "base"
+        }
+    ]
+}
