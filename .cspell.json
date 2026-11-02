@@ -1,0 +1,15 @@
+{
+    "words": [
+        "anyhttp",
+        "ASIO",
+        "cares",
+        "corosio",
+        "Eisenlohr",
+        "psedoc",
+        "spdlog"
+    ],
+    "ignorePaths": [
+        ".devcontainer/*",
+        "**/CMakeLists.txt"
+    ]
+}

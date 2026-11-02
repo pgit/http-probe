@@ -1,0 +1,8 @@
+.cache
+.claude
+.vscode
+build
+build-*
+CMakeUserPresets.json
+Testing
+callgrind.*
