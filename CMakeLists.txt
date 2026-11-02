@@ -55,9 +55,20 @@ FetchContent_MakeAvailable(anyhttp c_ares_async)
 
 # --------------------------------------------------------------------------------------------------
 
+#
+# The crawler in a library of its own, for the tests to link. The warnings are not for the sources
+# from c-ares-async that the tests borrow, see test/CMakeLists.txt.
+#
+set(crawler_warnings -Wall -Wextra -Werror -Wno-missing-designated-field-initializers)
+
+add_library(crawler_core STATIC src/crawler.cpp src/links.cpp src/robots.cpp src/routes.cpp)
+target_include_directories(crawler_core PUBLIC src)
+target_link_libraries(crawler_core PUBLIC anyhttp::anyhttp c_ares_async::c_ares_async)
+target_compile_options(crawler_core PRIVATE ${crawler_warnings})
+
 add_executable(crawler src/main.cpp)
-target_link_libraries(crawler PRIVATE anyhttp::anyhttp c_ares_async::c_ares_async)
-target_compile_options(crawler PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(crawler PRIVATE crawler_core)
+target_compile_options(crawler PRIVATE ${crawler_warnings})
 
 enable_testing()
-add_test(NAME crawler_starts COMMAND crawler)
+add_subdirectory(test)
