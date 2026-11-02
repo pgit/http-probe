@@ -6,6 +6,11 @@ A simple web crawler on [anyhttp](https://github.com/pgit/anyhttp) (HTTP/1.1, HT
 **It does not crawl anything yet.** The `crawler` program sets up both libraries on one event loop
 and exits, which shows that they build and link into one process.
 
+> [!WARNING]
+> This repository is purely experimental. It is not meant for production use, and anything in it
+> can change or break at any time, without notice.
+
+
 ## Build
 
 C++23 and CMake 3.30 or later. The devcontainer in [.devcontainer](.devcontainer) has the compilers
