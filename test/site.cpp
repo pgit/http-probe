@@ -1,6 +1,7 @@
 #include "site.hpp"
 
 #include <boost/beast/http/field.hpp>
+#include <boost/system/system_error.hpp>
 
 #include "routes.hpp"
 
@@ -30,13 +31,7 @@ Site::Site(const anyhttp::Executor& executor) : requests_(std::make_shared<std::
    std::ofstream(certificate_file_) << certificate.certificate_pem;
    std::ofstream(key_file_) << certificate.key_pem;
 
-   //
-   // "::" takes IPv4 as well, and "localhost" may be either.
-   //
-   server_.emplace(executor, anyhttp::server::Config{.listen_address = "::",
-                                                     .port = 0,
-                                                     .tls_certificate_chain = certificate_file_,
-                                                     .tls_private_key = key_file_});
+   start(executor);
    port_ = server_->local_endpoint().port();
 
    server_->on_request([this, requests = requests_](
@@ -66,8 +61,38 @@ Site::Site(const anyhttp::Executor& executor) : requests_(std::make_shared<std::
          co_return;
       co_await response.write_eof(boost::asio::buffer(page.body));
    });
+}
 
-   dns_.emplace(executor);
+//
+// Port 0 finds a free port for one protocol, and then the servers need the same number for the
+// other: anyhttp's has TCP and UDP on one port, and so does the DNS server. With tests running at
+// the same time, another one may have the other half by then, so this is tried a few times.
+//
+void Site::start(const anyhttp::Executor& executor)
+{
+   for (int attempt = 1;; ++attempt)
+   {
+      try
+      {
+         //
+         // "::" takes IPv4 as well, and "localhost" may be either.
+         //
+         server_.emplace(executor,
+                         anyhttp::server::Config{.listen_address = "::",
+                                                 .port = 0,
+                                                 .tls_certificate_chain = certificate_file_,
+                                                 .tls_private_key = key_file_});
+         dns_.emplace(executor);
+         return;
+      }
+      catch (const boost::system::system_error& ex)
+      {
+         if (ex.code() != boost::system::errc::address_in_use || attempt == 20)
+            throw;
+         server_.reset();
+         dns_.reset();
+      }
+   }
 }
 
 Site::~Site()

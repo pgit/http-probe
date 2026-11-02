@@ -10,6 +10,8 @@
 #include <boost/url/parse.hpp>
 #include <boost/url/url.hpp>
 
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <cctype>
 #include <exception>
@@ -31,6 +33,26 @@ namespace
 constexpr std::string_view user_agent = "http-probe/0.0.1 (+https://github.com/pgit/http-probe)";
 
 constexpr int max_alias_chain = 8;
+
+//
+// The resolver does not write anywhere by itself. Its messages go where those of anyhttp go, which
+// is the default logger of spdlog.
+//
+void log_to_spdlog(c_ares_async::log_level level, std::string_view message)
+{
+   using enum c_ares_async::log_level;
+   switch (level)
+   {
+   case debug:
+      return spdlog::debug("{}", message);
+   case info:
+      return spdlog::info("{}", message);
+   case warning:
+      return spdlog::warn("{}", message);
+   case error:
+      return spdlog::error("{}", message);
+   }
+}
 
 // =================================================================================================
 
@@ -91,6 +113,8 @@ Prober::Prober(anyhttp::Executor executor, Config config, Observer observer)
          hosts_.push_back(std::move(name));
    }
 
+   resolver_.set_logger(&log_to_spdlog);
+
    if (!config_.dns_server.empty())
       if (const auto ec = resolver_.set_servers(config_.dns_server))
          throw std::invalid_argument(
@@ -141,6 +165,7 @@ anyhttp::Task<ServiceRecords> Prober::resolve_service(const std::string& host)
       // Outside of any timeout: the image has c-ares 1.34.5, and cancelling a lookup is what
       // GHSA-6wfj-rwm7-3542 is about. c-ares has timeouts of its own.
       //
+      spdlog::debug("{}: asking for the HTTPS records of '{}'", host, found.owner);
       auto [ec, records] = co_await resolver_.resolve_https(found.owner);
       if (ec)
       {
@@ -198,6 +223,8 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
 
    const auto plan = plan_routes(host, found);
    result.notes = plan.rejected;
+   for (const auto& rejected : plan.rejected)
+      spdlog::debug("{}: rejected: {}", host, rejected);
 
    if (plan.routes.empty())
    {
@@ -210,12 +237,14 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
    result.outcome = Result::Outcome::failed;
    for (const auto& route : plan.routes)
    {
+      spdlog::debug("{}: connecting by {}, for {}", host, route.to_string(), route.source);
       const auto start = std::chrono::steady_clock::now();
       auto response = co_await attempt(route, host);
       if (response.ec)
       {
          result.error = std::format("[{}] {}", route.to_string(), response.error);
          result.notes.push_back(result.error);
+         spdlog::debug("{}: {}", host, result.error);
          continue;
       }
 

@@ -20,8 +20,8 @@ and connects to those that offer HTTP/3. From each of them it requests `https://
 prints the status, the route, the time it took and the header fields of the response, along with the
 host's records. A redirect is reported and not followed, and nothing else on the host is requested.
 
-HTTP/3 is what it takes because anyhttp's client has TLS on HTTP/3 only, so far. There is a line of
-output for every host that offers it and every lookup that failed, and `--verbose` adds the others.
+HTTP/3 is what it takes because anyhttp's client has TLS on HTTP/3 only, so far. There is output for
+every host that offers it and every lookup that failed, and `--all` adds the others.
 The counts at the end look like this, on stderr:
 
 ```
@@ -39,6 +39,11 @@ The counts at the end look like this, on stderr:
 Aliases are followed, a record has to be compatible, and the lowest priority goes first. Over HTTP/3,
 the address comes from anyhttp's own resolver and not from c-ares, so `--dns-server` and the address
 hints in the record do not apply to it.
+
+**To see what is going on,** `-v` logs to stderr: the requests and responses from anyhttp, the queries
+from c-ares and the steps in between. `-vv` adds all of QUIC. Hosts run at the same time mix in the
+log, so `--concurrency 1` helps. Colours are for terminals only unless there is `--color`, except that
+anyhttp puts them into some of its log messages regardless.
 
 **Use `--dns-server`.** The resolver in the devcontainer answers with no data for HTTPS records, even
 where they exist, which looks just like no host having any.

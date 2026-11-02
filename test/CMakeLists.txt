@@ -29,7 +29,7 @@ target_include_directories(test_site PUBLIC .)
 target_link_libraries(test_site PUBLIC http_probe_core fake_dns)
 target_compile_options(test_site PRIVATE ${http_probe_warnings})
 
-add_executable(http_probe_tests prober_test.cpp routes_test.cpp)
+add_executable(http_probe_tests output_test.cpp prober_test.cpp routes_test.cpp)
 target_link_libraries(http_probe_tests PRIVATE test_site GTest::gmock GTest::gtest_main)
 target_compile_options(http_probe_tests PRIVATE ${http_probe_warnings})
 

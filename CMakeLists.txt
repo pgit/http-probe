@@ -61,7 +61,7 @@ FetchContent_MakeAvailable(anyhttp c_ares_async)
 #
 set(http_probe_warnings -Wall -Wextra -Werror -Wno-missing-designated-field-initializers)
 
-add_library(http_probe_core STATIC src/prober.cpp src/routes.cpp)
+add_library(http_probe_core STATIC src/output.cpp src/prober.cpp src/routes.cpp)
 target_include_directories(http_probe_core PUBLIC src)
 target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::c_ares_async)
 target_compile_options(http_probe_core PRIVATE ${http_probe_warnings})

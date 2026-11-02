@@ -9,6 +9,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/udp.hpp>
 
+#include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
 
 #include <gmock/gmock.h>
@@ -17,6 +18,7 @@
 #include <chrono>
 #include <exception>
 #include <format>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -465,6 +467,36 @@ TEST_F(Probe, IgnoresServiceRecordsNextToAnAlias)
       << "the alias has no records of its own";
    EXPECT_TRUE(results[0].aliased);
    EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+// =================================================================================================
+// What can be seen of it
+// =================================================================================================
+
+TEST_F(Probe, LogsTheHttpAndTheLookupsAtDebugLevel)
+{
+   //
+   // What -v is for. The wording is up to the libraries, so this is only about it being there.
+   //
+   std::ostringstream log;
+   const auto previous = spdlog::default_logger();
+   spdlog::set_default_logger(std::make_shared<spdlog::logger>(
+      "test", std::make_shared<spdlog::sinks::ostream_sink_mt>(log)));
+   spdlog::set_level(spdlog::level::debug);
+
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+   probe(config());
+
+   spdlog::set_default_logger(previous);
+   quiet();
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200);
+
+   EXPECT_THAT(log.str(), HasSubstr("asking for the HTTPS records of 'localhost'")) << "our own";
+   EXPECT_THAT(log.str(), HasSubstr("GET https://localhost/")) << "anyhttp's request";
+   EXPECT_THAT(log.str(), HasSubstr("content-type")) << "anyhttp's response";
 }
 
 // =================================================================================================

@@ -69,6 +69,8 @@ public:
    void stop();
 
 private:
+   void start(const anyhttp::Executor& executor);
+
    std::filesystem::path directory_;
    std::filesystem::path certificate_file_;
    std::filesystem::path key_file_;

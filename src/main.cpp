@@ -1,12 +1,16 @@
 //
 // http-probe [options] HOST...
 //
+#include "output.hpp"
 #include "prober.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+
+#include <unistd.h>
 
 #include <charconv>
 #include <chrono>
@@ -15,7 +19,6 @@
 #include <exception>
 #include <format>
 #include <fstream>
-#include <map>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -38,7 +41,11 @@ followed, and nothing else on the host is requested.
   --ca-file PEM       the CA certificates to verify servers with; default: the system's
   --concurrency N     how many hosts to work on at the same time; default: 16
   --timeout-ms N      how long one request may take; default: 10000
-  --verbose           also print the hosts without HTTP/3, and why
+  --all               also print the hosts without HTTP/3, and why
+  --color             colour the output even where it does not go to a terminal, e.g. into 'less -R'
+  -v, --verbose       log to stderr what is going on, the requests and responses of anyhttp and the
+                      queries of c-ares among it; -vv for all of QUIC as well, which is a lot. To
+                      make sense of it, use --concurrency 1.
 
 The exit code is 0 if every host with HTTP/3 answered, whatever the status, and every lookup got an
 answer.
@@ -47,7 +54,9 @@ answer.
 struct Arguments
 {
    http_probe::Config config;
-   bool verbose = false;
+   bool all = false;
+   bool color = false;
+   int verbosity = 0;
 };
 
 template <typename T>
@@ -73,9 +82,19 @@ Arguments parse_arguments(int argc, char* argv[])
          continue;
       }
 
-      if (argument == "--verbose")
+      if (argument == "--all")
       {
-         arguments.verbose = true;
+         arguments.all = true;
+         continue;
+      }
+      if (argument == "--color")
+      {
+         arguments.color = true;
+         continue;
+      }
+      if (argument == "-v" || argument == "--verbose" || argument == "-vv")
+      {
+         arguments.verbosity += argument == "-vv" ? 2 : 1;
          continue;
       }
 
@@ -107,60 +126,47 @@ Arguments parse_arguments(int argc, char* argv[])
    return arguments;
 }
 
-using Outcome = http_probe::Result::Outcome;
-
-void print(const http_probe::Result& result)
+//
+// Everywhere that anyhttp and c-ares log to, as both use the default logger. On stderr, so that the
+// results can go somewhere by themselves.
+//
+void set_up_logging(int verbosity, bool color)
 {
-   switch (result.outcome)
-   {
-   case Outcome::answered:
-      std::println("{}: {} [{}] {} bytes in {}", result.host, result.status, result.route,
-                   result.body_size, result.duration);
-      break;
-   case Outcome::failed:
-      std::println("{}: failed: {}", result.host, result.error);
-      break;
-   case Outcome::out_of_reach:
-      std::println("{}: HTTP/3 out of reach", result.host);
-      break;
-   case Outcome::no_http3:
-      std::println("{}: no HTTP/3", result.host);
-      break;
-   case Outcome::lookup_failed:
-      std::println("{}: lookup failed", result.host);
-      break;
-   }
-
-   for (const auto& record : result.records)
-      std::println("  record: {}", http_probe::to_text(record));
-   for (const auto& note : result.notes)
-      std::println("  note: {}", note);
-   for (const auto& [name, value] : result.fields)
-      std::println("  {}: {}", name, value);
-
-   std::fflush(stdout); // a run can take a while, and it is worth watching
+   spdlog::set_default_logger(spdlog::stderr_color_mt(
+      "http-probe", color ? spdlog::color_mode::always : spdlog::color_mode::automatic));
+   spdlog::set_pattern("%H:%M:%S.%e %^%l%$ %v");
+   spdlog::set_level(verbosity >= 2   ? spdlog::level::trace
+                     : verbosity == 1 ? spdlog::level::debug
+                                      : spdlog::level::err);
 }
 
 } // namespace
 
 int main(int argc, char* argv[])
 {
-   spdlog::set_level(spdlog::level::err); // anyhttp logs through the default logger
+   using Outcome = http_probe::Result::Outcome;
 
-   std::map<Outcome, std::size_t> counts;
+   http_probe::Counts counts;
    std::size_t with_records = 0;
 
    try
    {
-      auto [config, verbose] = parse_arguments(argc, argv);
-      const bool own_dns_server = !config.dns_server.empty();
+      auto [config, all, color, verbosity] = parse_arguments(argc, argv);
+      set_up_logging(verbosity, color);
 
-      const auto report = [&, verbose](const http_probe::Result& result) {
+      const bool own_dns_server = !config.dns_server.empty();
+      const bool color_results = color || isatty(STDOUT_FILENO);
+      const bool color_summary = color || isatty(STDERR_FILENO);
+
+      const auto report = [&](const http_probe::Result& result) {
          ++counts[result.outcome];
          if (!result.records.empty() || result.aliased)
             ++with_records;
-         if (verbose || result.outcome != Outcome::no_http3)
-            print(result);
+         if (all || result.outcome != Outcome::no_http3)
+         {
+            std::print("{}", http_probe::format_result(result, color_results));
+            std::fflush(stdout); // a run can take a while, and it is worth watching
+         }
       };
 
       boost::asio::io_context context;
@@ -173,13 +179,7 @@ int main(int argc, char* argv[])
          // Here and not after run(): a host that did not answer can keep the context from running
          // dry for a while, see the README, and this is what the wait would be for.
          //
-         const auto count = [&](Outcome outcome) { return counts[outcome]; };
-         std::println(stderr,
-                      "{} answered, {} failed, {} with HTTP/3 out of reach, {} without HTTP/3, "
-                      "{} lookups failed",
-                      count(Outcome::answered), count(Outcome::failed),
-                      count(Outcome::out_of_reach), count(Outcome::no_http3),
-                      count(Outcome::lookup_failed));
+         std::println(stderr, "{}", http_probe::format_summary(counts, color_summary));
          if (with_records == 0 && !own_dns_server)
             std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
                                  "resolver answers for them, so try --dns-server.");
