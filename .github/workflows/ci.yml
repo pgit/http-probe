@@ -1,0 +1,37 @@
+#
+# Builds from the pins only, in the image the devcontainer is built from. The runner image is pinned
+# rather than ubuntu-latest, like in anyhttp and c-ares-async.
+#
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    container:
+      image: docker.io/psedoc/anyhttp:0.31
+      options: --user root
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake --preset pinned
+
+      - name: Build
+        run: cmake --build --preset pinned
+
+      - name: Test
+        run: ctest --preset pinned
