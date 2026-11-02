@@ -2,6 +2,9 @@
 
 #include <anyhttp/session.hpp>
 
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/deferred.hpp>
+#include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/beast/http/field.hpp>
 #include <boost/url/parse.hpp>
@@ -76,6 +79,8 @@ Prober::Prober(anyhttp::Executor executor, Config config, Observer observer)
 {
    if (config_.hosts.empty())
       throw std::invalid_argument("nothing to do: no host names given");
+   if (config_.concurrency == 0)
+      throw std::invalid_argument("a concurrency of 0 would never get anywhere");
 
    std::set<std::string> seen;
    for (const auto& host : config_.hosts)
@@ -94,8 +99,28 @@ Prober::Prober(anyhttp::Executor executor, Config config, Observer observer)
 
 anyhttp::Task<void> Prober::run()
 {
-   for (const auto& host : hosts_)
+   namespace asio = boost::asio;
+   using Worker = decltype(asio::co_spawn(executor_, work(), asio::deferred));
+
+   std::vector<Worker> workers;
+   for (std::size_t i = 0; i < std::min(config_.concurrency, hosts_.size()); ++i)
+      workers.push_back(asio::co_spawn(executor_, work(), asio::deferred));
+
+   auto [order, exceptions] = co_await asio::experimental::make_parallel_group(std::move(workers))
+                                 .async_wait(asio::experimental::wait_for_all(), asio::deferred);
+
+   for (const auto& exception : exceptions)
+      if (exception)
+         std::rethrow_exception(exception);
+}
+
+anyhttp::Task<void> Prober::work()
+{
+   while (next_host_ < hosts_.size())
+   {
+      const auto& host = hosts_[next_host_++];
       observer_(co_await probe(host));
+   }
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -121,8 +146,11 @@ anyhttp::Task<ServiceRecords> Prober::resolve_service(const std::string& host)
       {
          if (ec != c_ares_async::make_ares_error(ARES_ENODATA) &&
              ec != c_ares_async::make_ares_error(ARES_ENOTFOUND))
+         {
+            found.lookup_failed = true;
             found.notes.push_back(
                std::format("HTTPS lookup of '{}': {}", found.owner, ec.message()));
+         }
          co_return found;
       }
 
@@ -165,12 +193,21 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
    Result result{.host = host};
 
    const auto found = co_await resolve_service(host);
+   result.aliased = found.aliased;
    result.records = found.records;
 
    const auto plan = plan_routes(host, found);
    result.notes = plan.rejected;
-   result.error = "no way to connect";
 
+   if (plan.routes.empty())
+   {
+      result.outcome = plan.h3_out_of_reach  ? Result::Outcome::out_of_reach
+                       : found.lookup_failed ? Result::Outcome::lookup_failed
+                                             : Result::Outcome::no_http3;
+      co_return result;
+   }
+
+   result.outcome = Result::Outcome::failed;
    for (const auto& route : plan.routes)
    {
       const auto start = std::chrono::steady_clock::now();
@@ -182,6 +219,7 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
          continue;
       }
 
+      result.outcome = Result::Outcome::answered;
       result.error.clear();
       result.status = static_cast<int>(response.message.result_int());
       result.route = route.to_string();

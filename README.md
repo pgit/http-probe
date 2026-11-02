@@ -11,35 +11,40 @@ Requests hosts the way their HTTPS records say, on [anyhttp](https://github.com/
 ## What it does
 
 ```sh
-http-probe example.com www.example.org
-http-probe --file hostnames.txt
+http-probe --dns-server 1.1.1.1 cloudflare.com
+http-probe --dns-server 1.1.1.1 --file hostnames.txt
 ```
 
-It requests `https://<host>/` once for each host, in turn, and prints the status, the route, the time
-it took and the header fields of the response, along with the host's HTTPS records. A redirect is
-reported and not followed, and nothing else on the host is requested, `robots.txt` included.
-`http-probe` without arguments lists the options. The exit code is 0 if every host answered, whatever
-the status.
+It looks up the HTTPS records of each host in DNS ([RFC 9460](https://www.rfc-editor.org/rfc/rfc9460)),
+and connects to those that offer HTTP/3. From each of them it requests `https://<host>/` once, and
+prints the status, the route, the time it took and the header fields of the response, along with the
+host's records. A redirect is reported and not followed, and nothing else on the host is requested.
 
-How to connect is up to the host's HTTPS records in DNS ([RFC 9460](https://www.rfc-editor.org/rfc/rfc9460)):
-aliases are followed, a record has to be compatible, and the lowest priority goes first. The port
-comes from the record.
+HTTP/3 is what it takes because anyhttp's client has TLS on HTTP/3 only, so far. There is a line of
+output for every host that offers it and every lookup that failed, and `--verbose` adds the others.
+The counts at the end look like this, on stderr:
 
-What can be used of that is limited by what anyhttp's client does so far:
+```
+12 answered, 1 failed, 0 with HTTP/3 out of reach, 180 without HTTP/3, 2 lookups failed
+```
 
-| The host has                              | What happens                                  |
-|-------------------------------------------|-----------------------------------------------|
-| a record with `h3` in its ALPN set        | HTTP/3, to the port of the record             |
-| a record without `h3`                     | rejected: needs TLS over TCP                  |
-| a record with a target that is not itself | rejected: can't verify one name and connect to another |
-| no record                                 | rejected: needs TLS over TCP                  |
+| The host                                      | Outcome                                     |
+|-----------------------------------------------|---------------------------------------------|
+| has a record with `h3` in its ALPN set        | answered or failed, to the port of the record |
+| has that only on a target that is not itself  | out of reach: anyhttp can't connect to one name and verify another |
+| has records without `h3`, or none at all      | without HTTP/3, not connected to            |
+| does not exist                                | without HTTP/3, not connected to            |
+| gets no answer from DNS                       | lookup failed, so there is no telling       |
 
-Every rejection is printed with its reason. Over HTTP/3, the address comes from anyhttp's own resolver
-and not from c-ares, so `--dns-server` and the address hints in the record do not apply to it.
+Aliases are followed, a record has to be compatible, and the lowest priority goes first. Over HTTP/3,
+the address comes from anyhttp's own resolver and not from c-ares, so `--dns-server` and the address
+hints in the record do not apply to it.
 
-The resolver in the devcontainer may answer with no data for HTTPS records, even where they exist
-(see c-ares-async's [example](https://github.com/pgit/c-ares-async/blob/master/example/resolve/README.md)).
-`--dns-server` is what gets around that.
+**Use `--dns-server`.** The resolver in the devcontainer answers with no data for HTTPS records, even
+where they exist, which looks just like no host having any.
+
+**The program can take a while to end.** If a host with HTTP/3 did not answer, anyhttp goes on sending
+to it for 30 seconds after the timeout. The counts are printed when the work is done, ahead of that.
 
 To see it work without going anywhere, `demo_site` runs a site and a DNS server on loopback, and
 prints the command to request it with:

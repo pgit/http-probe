@@ -10,6 +10,7 @@
 #include <c_ares_async/resolver.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <istream>
 #include <string>
@@ -26,6 +27,9 @@ struct Config
 {
    /// The host names to request, exactly as given: these are the only names that are connected to.
    std::vector<std::string> hosts;
+
+   /// How many hosts to work on at the same time.
+   std::size_t concurrency = 16;
 
    /// How long the request may take on one route, from connecting to the end of the response.
    std::chrono::milliseconds timeout{10000};
@@ -51,24 +55,38 @@ std::vector<std::string> read_hosts(std::istream& list, std::vector<std::string>
 /// What came of one host.
 struct Result
 {
+   enum class Outcome
+   {
+      answered, ///< it has HTTP/3, and a response arrived, whatever its status
+      failed, ///< it has HTTP/3, and no response could be had
+      out_of_reach, ///< it has HTTP/3, but on a target that can't be used, see plan_routes()
+      no_http3, ///< its records offer no HTTP/3, or it has none, or the name does not exist
+      lookup_failed, ///< DNS gave no answer, so there is no telling
+   };
+
    std::string host;
+   Outcome outcome = Outcome::no_http3;
+   bool aliased = false; ///< its records are those of another name
    std::vector<c_ares_async::https_record> records; ///< the records that were considered
 
-   int status = 0; ///< the status of the response, 0 if there was none
-   std::string route; ///< what the response came over
-   std::vector<std::pair<std::string, std::string>> fields; ///< the header fields of the response
-   std::size_t body_size = 0;
-   std::chrono::milliseconds duration{}; ///< of the attempt that gave the response
+   int status = 0; ///< with \c answered
+   std::string route; ///< with \c answered: what the response came over
+   std::vector<std::pair<std::string, std::string>> fields; ///< with \c answered
+   std::size_t body_size = 0; ///< with \c answered
+   std::chrono::milliseconds duration{}; ///< with \c answered: of the attempt that got through
 
-   std::string error; ///< why there is no response
+   std::string error; ///< with \c failed: what went wrong on the last route
    std::vector<std::string> notes; ///< records that could not be used, routes that did not work
 };
 
 /**
- * Requests each of Config::hosts once and in turn, using the resolver of c-ares-async to find out
- * how to connect to it (see plan_routes()). A response is what comes back, whatever its status: a
- * redirect is reported and not followed, nothing in the body is looked at, and nothing else on the
- * host is requested.
+ * Looks up the HTTPS records of each of Config::hosts with the resolver of c-ares-async, and for
+ * those that offer HTTP/3, sends one request (see plan_routes()). A response is what comes back,
+ * whatever its status: a redirect is reported and not followed, nothing in the body is looked at,
+ * and nothing else on the host is requested.
+ *
+ * Hosts are worked on Config::concurrency at a time, so results arrive as they are ready. All of
+ * this is on the one executor, which is also what calls the observer.
  */
 class Prober
 {
@@ -89,6 +107,7 @@ private:
       std::string error;
    };
 
+   anyhttp::Task<void> work();
    anyhttp::Task<ServiceRecords> resolve_service(const std::string& host);
    anyhttp::Task<Result> probe(const std::string& host);
    anyhttp::Task<Response> attempt(const Route& route, const std::string& host);
@@ -97,6 +116,7 @@ private:
    Config config_;
    Observer observer_;
    std::vector<std::string> hosts_;
+   std::size_t next_host_ = 0;
    c_ares_async::resolver resolver_;
 };
 

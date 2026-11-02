@@ -17,6 +17,7 @@
 #include <chrono>
 #include <exception>
 #include <format>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -121,6 +122,14 @@ TEST_F(Probe, RefusesToRunWithoutHosts)
    finish();
 }
 
+TEST_F(Probe, RefusesAConcurrencyOfZero)
+{
+   auto configuration = config();
+   configuration.concurrency = 0;
+   EXPECT_THROW(probe(std::move(configuration)), std::invalid_argument);
+   finish();
+}
+
 TEST_F(Probe, RefusesAnythingButAHostName)
 {
    for (const auto* host : {"https://localhost/", "localhost/x", "localhost:443", "*.localhost",
@@ -167,7 +176,7 @@ TEST_F(Probe, RequestsTheHostAtThePortOfItsRecord)
 
    ASSERT_EQ(results.size(), 1u);
    const auto& result = results[0];
-   EXPECT_EQ(result.error, "") << notes(result);
+   EXPECT_EQ(result.outcome, Result::Outcome::answered) << notes(result);
    EXPECT_EQ(result.host, "localhost");
    EXPECT_EQ(result.status, 200);
    EXPECT_EQ(result.route, std::format("h3 localhost:{}", site.port()));
@@ -219,7 +228,7 @@ TEST_F(Probe, ReportsAnErrorStatusAsAResponse)
 
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].status, 503);
-   EXPECT_EQ(results[0].error, "");
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered);
 }
 
 TEST_F(Probe, RequestsEachHostOnce)
@@ -242,9 +251,90 @@ TEST_F(Probe, GoesOnAfterAHostThatFails)
 
    ASSERT_EQ(results.size(), 2u);
    EXPECT_EQ(results[0].host, "nowhere.example.test");
-   EXPECT_NE(results[0].error, "");
+   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
    EXPECT_EQ(results[1].host, "localhost");
    EXPECT_EQ(results[1].status, 200);
+}
+
+// =================================================================================================
+// A list of hosts
+// =================================================================================================
+
+TEST_F(Probe, ConnectsToTheHostsWithHttp3AndToNoOthers)
+{
+   //
+   // The other names exist, with records or without, and their addresses are the server's. It takes
+   // no more than connecting to any of them to show up in its requests.
+   //
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.dns().add_address("h2.example.test", "127.0.0.1");
+   site.dns().add_https("h2.example.test", 1, ".", {alpn_h2});
+   site.dns().add_address("plain.example.test", "127.0.0.1");
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config({"h2.example.test", "plain.example.test", "localhost"});
+   configuration.concurrency = 1;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 3u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
+   EXPECT_EQ(results[1].outcome, Result::Outcome::no_http3);
+   EXPECT_EQ(results[2].outcome, Result::Outcome::answered) << notes(results[2]);
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+   EXPECT_EQ(site.requests()[0].authority, "localhost");
+}
+
+TEST_F(Probe, ReportsEachHostOnceHoweverManyThereAre)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   std::vector<std::string> hosts{"localhost"};
+   for (int i = 0; i < 100; ++i)
+      hosts.push_back(std::format("host{}.example.test", i));
+
+   auto configuration = config(hosts);
+   configuration.concurrency = 7;
+   probe(std::move(configuration));
+
+   std::set<std::string> reported;
+   for (const auto& result : results)
+      reported.insert(result.host);
+   EXPECT_EQ(results.size(), hosts.size());
+   EXPECT_EQ(reported.size(), hosts.size());
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, DoesNotLetASlowHostHoldUpTheOthers)
+{
+   boost::asio::ip::udp::socket silent(context, {boost::asio::ip::udp::v6(), 0});
+   abandon_quic_sessions = true;
+   site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
+
+   auto configuration = config({"localhost", "nowhere.example.test"});
+   configuration.timeout = 200ms;
+   configuration.concurrency = 2;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 2u);
+   EXPECT_EQ(results[0].host, "nowhere.example.test");
+   EXPECT_EQ(results[1].host, "localhost");
+}
+
+TEST_F(Probe, WorksOnOneHostAtATimeIfToldTo)
+{
+   boost::asio::ip::udp::socket silent(context, {boost::asio::ip::udp::v6(), 0});
+   abandon_quic_sessions = true;
+   site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
+
+   auto configuration = config({"localhost", "nowhere.example.test"});
+   configuration.timeout = 200ms;
+   configuration.concurrency = 1;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 2u);
+   EXPECT_EQ(results[0].host, "localhost");
+   EXPECT_EQ(results[1].host, "nowhere.example.test");
 }
 
 // =================================================================================================
@@ -295,8 +385,7 @@ TEST_F(Probe, FailsWithoutARecord)
    probe(config());
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].status, 0);
-   EXPECT_EQ(results[0].error, "no way to connect");
+   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
    EXPECT_THAT(notes(results[0]), HasSubstr("TLS over TCP"));
    EXPECT_THAT(site.requests(), IsEmpty());
 }
@@ -312,7 +401,7 @@ TEST_F(Probe, DoesNotConnectToATargetOtherThanTheHost)
    probe(config());
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].error, "no way to connect");
+   EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach);
    EXPECT_THAT(notes(results[0]), HasSubstr("elsewhere.example.test"));
    EXPECT_THAT(site.requests(), IsEmpty());
 }
@@ -329,7 +418,7 @@ TEST_F(Probe, RefusesACertificateItDoesNotTrust)
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].status, 0);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
    EXPECT_THAT(results[0].error, HasSubstr("connect"));
    EXPECT_THAT(site.requests(), IsEmpty()) << "no request survives the handshake";
 }
@@ -359,7 +448,7 @@ TEST_F(Probe, RecognizesAnAliasLoop)
    probe(config());
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].error, "no way to connect");
+   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
    EXPECT_THAT(notes(results[0]), HasSubstr("too long or has a loop"));
 }
 
@@ -372,7 +461,9 @@ TEST_F(Probe, IgnoresServiceRecordsNextToAnAlias)
    probe(config());
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].status, 0) << "the alias has no records of its own";
+   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3)
+      << "the alias has no records of its own";
+   EXPECT_TRUE(results[0].aliased);
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 
@@ -391,7 +482,7 @@ TEST_F(Probe, GivesUpOnAServerThatDoesNotAnswer)
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].status, 0);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
    EXPECT_THAT(results[0].error, HasSubstr("timed out"));
 }
 
@@ -400,7 +491,7 @@ TEST_F(Probe, ReportsANameThatDoesNotExist)
    probe(config({"nowhere.example.test"}));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].error, "no way to connect");
+   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 
@@ -412,7 +503,7 @@ TEST_F(Probe, ReportsAFailedLookup)
    probe(config());
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].error, "no way to connect");
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed) << "not the same as no HTTP/3";
    EXPECT_THAT(notes(results[0]), HasSubstr("HTTPS lookup"));
    EXPECT_THAT(site.requests(), IsEmpty());
 }

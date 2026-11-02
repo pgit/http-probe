@@ -57,3 +57,8 @@ set_tests_properties(http_probe_refuses_a_url PROPERTIES
 add_test(NAME http_probe_refuses_a_file_it_can_not_read COMMAND http-probe --file /nonexistent/list)
 set_tests_properties(http_probe_refuses_a_file_it_can_not_read PROPERTIES
     PASS_REGULAR_EXPRESSION "can't read")
+
+add_test(NAME http_probe_refuses_a_concurrency_of_zero
+         COMMAND http-probe --concurrency 0 localhost)
+set_tests_properties(http_probe_refuses_a_concurrency_of_zero PROPERTIES
+    PASS_REGULAR_EXPRESSION "concurrency of 0")

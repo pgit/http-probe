@@ -133,9 +133,12 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found)
       if (!service.offers("h3"))
          plan.rejected.push_back(std::format("{}: {}", text, no_tls_over_tcp));
       else if (target != host)
+      {
+         plan.h3_out_of_reach = true;
          plan.rejected.push_back(std::format(
             "{}: target '{}' is not the host, and anyhttp can only verify the name it connects to",
             text, target));
+      }
       else
          plan.routes.push_back(
             Route{.host = target, .port = service.port.value_or(443), .source = text});

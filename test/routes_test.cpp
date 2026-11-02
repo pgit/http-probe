@@ -108,6 +108,46 @@ TEST(Plan, RejectsATargetOtherThanTheHost)
    EXPECT_THAT(plan.routes, IsEmpty());
    ASSERT_EQ(plan.rejected.size(), 1u);
    EXPECT_THAT(plan.rejected[0], HasSubstr("cdn.example.net"));
+   EXPECT_TRUE(plan.h3_out_of_reach);
+}
+
+TEST(Plan, DoesNotCallItOutOfReachWithoutHttp3)
+{
+   const auto plan = plan_routes("example.com", found({record(1, "cdn.example.net", {"alpn=h2"})}));
+
+   EXPECT_FALSE(plan.h3_out_of_reach);
+}
+
+TEST(Plan, UsesTheRecordItCanOfAMixedSet)
+{
+   //
+   // As facebook.com has it.
+   //
+   const auto plan = plan_routes(
+      "example.com",
+      found({record(1, ".", {"alpn=h2,h3"}), record(2, "fallback.example.net", {"alpn=h2,h3"})}));
+
+   EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:443"));
+   ASSERT_EQ(plan.rejected.size(), 1u);
+   EXPECT_THAT(plan.rejected[0], HasSubstr("fallback.example.net"));
+}
+
+TEST(Plan, DoesNotTakeSomethingThatOnlyStartsWithH3)
+{
+   const auto plan = plan_routes("example.com", found({record(1, ".", {"alpn=h3-29,h2"})}));
+
+   EXPECT_THAT(plan.routes, IsEmpty());
+}
+
+TEST(Plan, IgnoresWhatItDoesNotKnowUnlessItIsMandatory)
+{
+   //
+   // key13930 is real, seen on one of the hosts in c-ares-async's list.
+   //
+   const auto plan =
+      plan_routes("example.com", found({record(1, ".", {"alpn=h3", "key13930=01", "ech=dead"})}));
+
+   EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:443"));
 }
 
 TEST(Plan, TakesAnExplicitTargetThatIsTheHost)

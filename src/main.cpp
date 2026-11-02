@@ -10,9 +10,12 @@
 
 #include <charconv>
 #include <chrono>
+#include <cstddef>
+#include <cstdio>
 #include <exception>
 #include <format>
 #include <fstream>
+#include <map>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -25,25 +28,54 @@ namespace
 constexpr std::string_view usage = R"(usage: http-probe [options] HOST...
        http-probe [options] --file LIST
 
-Requests https://HOST/ once for each host name and prints the status and header fields of the
-response. How to connect is up to the host's HTTPS records in DNS (RFC 9460). Redirects are reported
-and not followed, and nothing else on the host is requested.
+Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once from those that
+offer HTTP/3, printing the status and header fields of the response. Redirects are reported and not
+followed, and nothing else on the host is requested.
 
   --file LIST         read the hosts from a file, one per line, as names or as URLs
-  --dns-server ADDR   the DNS server to ask, like 192.0.2.1 or 192.0.2.1:5353; default: the system's
+  --dns-server ADDR   the DNS server to ask, like 192.0.2.1 or 192.0.2.1:5353; default: the system's,
+                      which may well not answer for HTTPS records
   --ca-file PEM       the CA certificates to verify servers with; default: the system's
+  --concurrency N     how many hosts to work on at the same time; default: 16
   --timeout-ms N      how long one request may take; default: 10000
+  --verbose           also print the hosts without HTTP/3, and why
+
+The exit code is 0 if every host with HTTP/3 answered, whatever the status, and every lookup got an
+answer.
 )";
 
-http_probe::Config parse_arguments(int argc, char* argv[])
+struct Arguments
 {
    http_probe::Config config;
+   bool verbose = false;
+};
+
+template <typename T>
+T number(std::string_view option, std::string_view text)
+{
+   T value{};
+   const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+   if (ec != std::errc{} || end != text.data() + text.size())
+      throw std::invalid_argument(std::format("{}: '{}' is not a number", option, text));
+   return value;
+}
+
+Arguments parse_arguments(int argc, char* argv[])
+{
+   Arguments arguments;
+   auto& config = arguments.config;
    for (int i = 1; i < argc; ++i)
    {
       const std::string_view argument = argv[i];
       if (!argument.starts_with("-"))
       {
          config.hosts.emplace_back(argument);
+         continue;
+      }
+
+      if (argument == "--verbose")
+      {
+         arguments.verbose = true;
          continue;
       }
 
@@ -65,28 +97,39 @@ http_probe::Config parse_arguments(int argc, char* argv[])
          config.dns_server = value;
       else if (argument == "--ca-file")
          config.tls_ca_file = value;
+      else if (argument == "--concurrency")
+         config.concurrency = number<std::size_t>(argument, value);
       else if (argument == "--timeout-ms")
-      {
-         unsigned milliseconds = 0;
-         const auto [end, ec] =
-            std::from_chars(value.data(), value.data() + value.size(), milliseconds);
-         if (ec != std::errc{} || end != value.data() + value.size())
-            throw std::invalid_argument(std::format("{}: '{}' is not a number", argument, value));
-         config.timeout = std::chrono::milliseconds(milliseconds);
-      }
+         config.timeout = std::chrono::milliseconds(number<unsigned>(argument, value));
       else
          throw std::invalid_argument(std::format("unknown option '{}'", argument));
    }
-   return config;
+   return arguments;
 }
+
+using Outcome = http_probe::Result::Outcome;
 
 void print(const http_probe::Result& result)
 {
-   if (result.error.empty())
+   switch (result.outcome)
+   {
+   case Outcome::answered:
       std::println("{}: {} [{}] {} bytes in {}", result.host, result.status, result.route,
                    result.body_size, result.duration);
-   else
+      break;
+   case Outcome::failed:
       std::println("{}: failed: {}", result.host, result.error);
+      break;
+   case Outcome::out_of_reach:
+      std::println("{}: HTTP/3 out of reach", result.host);
+      break;
+   case Outcome::no_http3:
+      std::println("{}: no HTTP/3", result.host);
+      break;
+   case Outcome::lookup_failed:
+      std::println("{}: lookup failed", result.host);
+      break;
+   }
 
    for (const auto& record : result.records)
       std::println("  record: {}", http_probe::to_text(record));
@@ -94,6 +137,8 @@ void print(const http_probe::Result& result)
       std::println("  note: {}", note);
    for (const auto& [name, value] : result.fields)
       std::println("  {}: {}", name, value);
+
+   std::fflush(stdout); // a run can take a while, and it is worth watching
 }
 
 } // namespace
@@ -102,19 +147,42 @@ int main(int argc, char* argv[])
 {
    spdlog::set_level(spdlog::level::err); // anyhttp logs through the default logger
 
-   bool all_answered = true;
-   const auto report = [&](const http_probe::Result& result) {
-      all_answered = all_answered && result.error.empty();
-      print(result);
-   };
+   std::map<Outcome, std::size_t> counts;
+   std::size_t with_records = 0;
 
    try
    {
+      auto [config, verbose] = parse_arguments(argc, argv);
+      const bool own_dns_server = !config.dns_server.empty();
+
+      const auto report = [&, verbose](const http_probe::Result& result) {
+         ++counts[result.outcome];
+         if (!result.records.empty() || result.aliased)
+            ++with_records;
+         if (verbose || result.outcome != Outcome::no_http3)
+            print(result);
+      };
+
       boost::asio::io_context context;
-      http_probe::Prober prober(context.get_executor(), parse_arguments(argc, argv), report);
-      boost::asio::co_spawn(context, prober.run(), [](const std::exception_ptr& ex) {
+      http_probe::Prober prober(context.get_executor(), std::move(config), report);
+      boost::asio::co_spawn(context, prober.run(), [&](const std::exception_ptr& ex) {
          if (ex)
             std::rethrow_exception(ex);
+
+         //
+         // Here and not after run(): a host that did not answer can keep the context from running
+         // dry for a while, see the README, and this is what the wait would be for.
+         //
+         const auto count = [&](Outcome outcome) { return counts[outcome]; };
+         std::println(stderr,
+                      "{} answered, {} failed, {} with HTTP/3 out of reach, {} without HTTP/3, "
+                      "{} lookups failed",
+                      count(Outcome::answered), count(Outcome::failed),
+                      count(Outcome::out_of_reach), count(Outcome::no_http3),
+                      count(Outcome::lookup_failed));
+         if (with_records == 0 && !own_dns_server)
+            std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
+                                 "resolver answers for them, so try --dns-server.");
       });
       context.run();
    }
@@ -129,5 +197,5 @@ int main(int argc, char* argv[])
       return 1;
    }
 
-   return all_answered ? 0 : 1;
+   return counts[Outcome::failed] == 0 && counts[Outcome::lookup_failed] == 0 ? 0 : 1;
 }

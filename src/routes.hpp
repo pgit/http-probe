@@ -31,6 +31,7 @@ struct ServiceRecords
    bool aliased = false; ///< at least one AliasMode record was followed
    std::vector<c_ares_async::https_record> records; ///< the ServiceMode records of \c owner
    std::vector<std::string> notes; ///< what went wrong on the way, none of which is fatal
+   bool lookup_failed = false; ///< no answer, which is not to say that there are no records
 };
 
 /// One way of connecting, which is HTTP/3 so far. The TLS name and the authority stay the host's.
@@ -48,6 +49,7 @@ struct Plan
 {
    std::vector<Route> routes; ///< in the order to try them; empty if there is no usable way
    std::vector<std::string> rejected; ///< what the records offered, or we knew of, and why not
+   bool h3_out_of_reach = false; ///< a record offers HTTP/3, but on a target that can't be used
 };
 
 /**
