@@ -28,6 +28,9 @@ any I/O, and [prober.cpp](src/prober.cpp) does the rest. The tests in [test/](te
 
 - Changes to a library belong in that library's repository and session, with a test in its suite.
   Do not work around a library bug in this code: get it fixed there, then move the pin.
+- Ask for a library change with an issue in that library's repository, using `gh`. Peter reviews the
+  full text first, and the same goes for comments on issues and for closing them. The repositories
+  are public, so reproduce on loopback and name no hosts from the lists.
 - Moving a pin in [CMakeLists.txt](CMakeLists.txt) is a commit of its own. CI builds from the pins
   only, so a change here that needs a library change has to wait for that change to be pushed.
 - The `dev` preset builds the sibling checkouts as they are, on whatever branch they are on, and can
@@ -43,5 +46,4 @@ As in anyhttp: clang-format with 3-space indent and 100 columns, members `foo_`,
 `snake_case`, types `CamelCase`. Commit subjects are prefixed `fix:`, `refactor:`, `docs:`, `chore:`
 or `test:`.
 
-Commit or push only when asked. `gh`'s token is read-only, so push over SSH to git@github.com; Peter
-opens the pull requests.
+Commit or push only when asked. Push over SSH to git@github.com; Peter opens the pull requests.
