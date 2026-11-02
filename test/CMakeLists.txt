@@ -62,3 +62,20 @@ add_test(NAME http_probe_refuses_a_concurrency_of_zero
          COMMAND http-probe --concurrency 0 localhost)
 set_tests_properties(http_probe_refuses_a_concurrency_of_zero PROPERTIES
     PASS_REGULAR_EXPRESSION "concurrency of 0")
+
+add_test(NAME http_probe_refuses_a_negative_concurrency
+         COMMAND http-probe --concurrency=-1 localhost)
+set_tests_properties(http_probe_refuses_a_negative_concurrency PROPERTIES
+    PASS_REGULAR_EXPRESSION "--concurrency can't be negative")
+
+add_test(NAME http_probe_refuses_a_negative_timeout COMMAND http-probe --timeout-ms -1 localhost)
+set_tests_properties(http_probe_refuses_a_negative_timeout PROPERTIES
+    PASS_REGULAR_EXPRESSION "--timeout-ms can't be negative")
+
+add_test(NAME http_probe_refuses_an_unknown_option COMMAND http-probe --no-such-option localhost)
+set_tests_properties(http_probe_refuses_an_unknown_option PROPERTIES
+    PASS_REGULAR_EXPRESSION "unrecognised option '--no-such-option'")
+
+add_test(NAME http_probe_describes_its_options COMMAND http-probe --help)
+set_tests_properties(http_probe_describes_its_options PROPERTIES
+    PASS_REGULAR_EXPRESSION "--dns-server ADDR")

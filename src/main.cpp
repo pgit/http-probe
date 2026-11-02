@@ -6,47 +6,41 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/program_options.hpp>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
 #include <unistd.h>
 
-#include <charconv>
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <exception>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <print>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
+namespace po = boost::program_options;
+
 namespace
 {
 
-constexpr std::string_view usage = R"(usage: http-probe [options] HOST...
+constexpr std::string_view about = R"(usage: http-probe [options] HOST...
        http-probe [options] --file LIST
 
 Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once from those that
 offer HTTP/3, printing the status and header fields of the response. Redirects are reported and not
 followed, and nothing else on the host is requested.
+)";
 
-  --file LIST         read the hosts from a file, one per line, as names or as URLs
-  --dns-server ADDR   the DNS server to ask, like 192.0.2.1 or 192.0.2.1:5353; default: the system's,
-                      which may well not answer for HTTPS records
-  --ca-file PEM       the CA certificates to verify servers with; default: the system's
-  --concurrency N     how many hosts to work on at the same time; default: 16
-  --timeout-ms N      how long one request may take; default: 10000
-  --all               also print the hosts without HTTP/3, and why
-  --color             colour the output even where it does not go to a terminal, e.g. into 'less -R'
-  -v, --verbose       log to stderr what is going on, the requests and responses of anyhttp and the
-                      queries of c-ares among it; -vv for all of QUIC as well, which is a lot. To
-                      make sense of it, use --concurrency 1.
-
+constexpr std::string_view exit_code = R"(
 The exit code is 0 if every host with HTTP/3 answered, whatever the status, and every lookup got an
 answer.
 )";
@@ -54,76 +48,110 @@ answer.
 struct Arguments
 {
    http_probe::Config config;
+   std::vector<std::string> files;
+   bool help = false;
    bool all = false;
    bool color = false;
    int verbosity = 0;
 };
 
-template <typename T>
-T number(std::string_view option, std::string_view text)
+//
+// The numbers are read as signed ones, because lexical_cast takes -1 for the largest value of an
+// unsigned type, which would pass as a choice.
+//
+int not_negative(std::string_view option, int value)
 {
-   T value{};
-   const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
-   if (ec != std::errc{} || end != text.data() + text.size())
-      throw std::invalid_argument(std::format("{}: '{}' is not a number", option, text));
+   if (value < 0)
+      throw std::invalid_argument(std::format("{} can't be negative", option));
    return value;
 }
 
-Arguments parse_arguments(int argc, char* argv[])
+//
+// The options, stored into 'arguments', which has to outlive parsing them.
+//
+po::options_description describe_options(Arguments& arguments)
 {
-   Arguments arguments;
    auto& config = arguments.config;
-   for (int i = 1; i < argc; ++i)
+
+   po::options_description desc("Options", 100, 50);
+   auto opts = desc.add_options();
+   opts("help,h", po::bool_switch(&arguments.help), "produce this help message");
+   opts("host", po::value(&config.hosts)->value_name("HOST"),
+        "a host to request, the same as giving HOST by itself");
+   opts("file", po::value(&arguments.files)->value_name("LIST"),
+        "read the hosts from a file, one per line, as names or as URLs");
+   opts("dns-server", po::value(&config.dns_server)->value_name("ADDR"),
+        "the DNS server to ask, like 192.0.2.1 or 192.0.2.1:5353; default: the system's, which may "
+        "well not answer for HTTPS records");
+   opts("ca-file", po::value(&config.tls_ca_file)->value_name("PEM"),
+        "the CA certificates to verify servers with; default: the system's");
+   opts("concurrency",
+        po::value<int>()
+           ->value_name("N")
+           ->default_value(static_cast<int>(config.concurrency))
+           ->notifier(
+              [&config](int value) { config.concurrency = not_negative("--concurrency", value); }),
+        "how many hosts to work on at the same time");
+   opts("timeout-ms",
+        po::value<int>()
+           ->value_name("N")
+           ->default_value(static_cast<int>(config.timeout.count()))
+           ->notifier([&config](int value) {
+              config.timeout = std::chrono::milliseconds(not_negative("--timeout-ms", value));
+           }),
+        "how long one request may take");
+   opts("all", po::bool_switch(&arguments.all), "also print the hosts without HTTP/3, and why");
+   opts("color", po::bool_switch(&arguments.color),
+        "colour the output even where it does not go to a terminal, e.g. into 'less -R'");
+   opts("verbose,v", po::value<std::vector<std::string>>()->zero_tokens()->composing(),
+        "log to stderr what is going on, the requests and responses of anyhttp and the queries of "
+        "c-ares among it; -vv for all of QUIC as well, which is a lot. To make sense of it, use "
+        "--concurrency 1.");
+   return desc;
+}
+
+void print_usage(std::ostream& out, const po::options_description& options)
+{
+   out << about << '\n' << options << exit_code;
+}
+
+void parse_arguments(int argc, char* argv[], const po::options_description& options,
+                     Arguments& arguments)
+{
+   try
    {
-      const std::string_view argument = argv[i];
-      if (!argument.starts_with("-"))
-      {
-         config.hosts.emplace_back(argument);
-         continue;
-      }
+      po::positional_options_description positional;
+      positional.add("host", -1);
 
-      if (argument == "--all")
-      {
-         arguments.all = true;
-         continue;
-      }
-      if (argument == "--color")
-      {
-         arguments.color = true;
-         continue;
-      }
-      if (argument == "-v" || argument == "--verbose" || argument == "-vv")
-      {
-         arguments.verbosity += argument == "-vv" ? 2 : 1;
-         continue;
-      }
+      const auto parsed =
+         po::command_line_parser(argc, argv).options(options).positional(positional).run();
 
-      if (i + 1 == argc)
-         throw std::invalid_argument(std::format("{} needs a value, or is unknown", argument));
-      const std::string_view value = argv[++i];
+      po::variables_map vm;
+      po::store(parsed, vm);
+      po::notify(vm);
 
-      if (argument == "--file")
-      {
-         std::ifstream list{std::string(value)};
-         if (!list)
-            throw std::invalid_argument(std::format("can't read '{}'", value));
-         std::vector<std::string> skipped;
-         config.hosts.append_range(http_probe::read_hosts(list, skipped));
-         for (const auto& line : skipped)
-            std::println(stderr, "http-probe: skipping '{}': not a host name", line);
-      }
-      else if (argument == "--dns-server")
-         config.dns_server = value;
-      else if (argument == "--ca-file")
-         config.tls_ca_file = value;
-      else if (argument == "--concurrency")
-         config.concurrency = number<std::size_t>(argument, value);
-      else if (argument == "--timeout-ms")
-         config.timeout = std::chrono::milliseconds(number<unsigned>(argument, value));
-      else
-         throw std::invalid_argument(std::format("unknown option '{}'", argument));
+      // 'verbose' takes no argument, so its parsed value is always empty: count occurrences
+      arguments.verbosity = static_cast<int>(std::ranges::count_if(
+         parsed.options, [](const po::option& option) { return option.string_key == "verbose"; }));
    }
-   return arguments;
+   catch (const po::error& ex)
+   {
+      throw std::invalid_argument(ex.what());
+   }
+
+   if (arguments.help)
+      return;
+
+   for (const auto& file : arguments.files)
+   {
+      std::ifstream list{file};
+      if (!list)
+         throw std::invalid_argument(std::format("can't read '{}'", file));
+      std::vector<std::string> skipped;
+      arguments.config.hosts.append_range(http_probe::read_hosts(list, skipped));
+      for (const auto& line : skipped)
+         std::println(stderr, "http-probe: skipping '{}': not a host name", line);
+   }
 }
 
 //
@@ -149,9 +177,19 @@ int main(int argc, char* argv[])
    http_probe::Counts counts;
    std::size_t with_records = 0;
 
+   Arguments arguments;
+   const auto options = describe_options(arguments);
+
    try
    {
-      auto [config, all, color, verbosity] = parse_arguments(argc, argv);
+      parse_arguments(argc, argv, options, arguments);
+      if (arguments.help)
+      {
+         print_usage(std::cout, options);
+         return 0;
+      }
+
+      auto& [config, files, help, all, color, verbosity] = arguments;
       set_up_logging(verbosity, color);
 
       const bool own_dns_server = !config.dns_server.empty();
@@ -188,7 +226,8 @@ int main(int argc, char* argv[])
    }
    catch (const std::invalid_argument& ex)
    {
-      std::println(stderr, "http-probe: {}\n\n{}", ex.what(), usage);
+      std::println(stderr, "http-probe: {}\n", ex.what());
+      print_usage(std::cerr, options);
       return 2;
    }
    catch (const std::exception& ex)

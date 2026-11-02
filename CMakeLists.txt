@@ -20,6 +20,8 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
     add_link_options(-stdlib=libc++)
     list(PREPEND CMAKE_PREFIX_PATH /opt/libc++)
+    # As in anyhttp: the shared ones share their names with the libstdc++ ones in /usr/local/lib.
+    set(Boost_USE_STATIC_LIBS ON)
 endif()
 
 # I/O runtime: ASIO or COROSIO. COROSIO would have to declare the capy and corosio pins here, too.
@@ -53,6 +55,9 @@ FetchContent_Declare(c_ares_async
     SYSTEM)
 FetchContent_MakeAvailable(anyhttp c_ares_async)
 
+# Only for the command line. Neither library needs this component, so neither asks for it here.
+find_package(Boost 1.88 REQUIRED COMPONENTS program_options)
+
 # --------------------------------------------------------------------------------------------------
 
 #
@@ -67,7 +72,7 @@ target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::c_ar
 target_compile_options(http_probe_core PRIVATE ${http_probe_warnings})
 
 add_executable(http-probe src/main.cpp)
-target_link_libraries(http-probe PRIVATE http_probe_core)
+target_link_libraries(http-probe PRIVATE http_probe_core Boost::program_options)
 target_compile_options(http-probe PRIVATE ${http_probe_warnings})
 
 enable_testing()
