@@ -16,6 +16,12 @@ These hold for all code in this repository, including tests and experiments.
 - **Run tests and programs under `timeout -s KILL`**, 5 seconds per test. Never let a suite sit on a
   hang.
 
+## The code
+
+[routes.cpp](src/routes.cpp) says what the HTTPS records of a name mean for how to connect, without
+any I/O, and [crawler.cpp](src/crawler.cpp) does the rest. The tests in [test/](test) run against
+[Site](test/site.hpp), a real anyhttp server and a DNS server with a zone of its own, on loopback.
+
 ## The libraries
 
 - Changes to a library belong in that library's repository and session, with a test in its suite.
