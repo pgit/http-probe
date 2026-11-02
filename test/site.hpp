@@ -45,9 +45,7 @@ public:
       std::chrono::steady_clock::time_point time;
    };
 
-   /// Listens on \p listen_address: all of them by default, "::" taking IPv4 as well, as
-   /// "localhost" may be either.
-   explicit Site(const anyhttp::Executor& executor, const std::string& listen_address = "::");
+   explicit Site(const anyhttp::Executor& executor);
    ~Site();
 
    /// A path that has no page gets a 404.

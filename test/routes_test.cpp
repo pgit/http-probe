@@ -3,8 +3,6 @@
 //
 #include "routes.hpp"
 
-#include <boost/url/url.hpp>
-
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -16,16 +14,14 @@ using testing::IsEmpty;
 namespace
 {
 
-Origin origin(std::string_view url) { return *origin_of(boost::urls::url(url)); }
-
 c_ares_async::https_record record(unsigned short priority, std::string target,
                                   std::vector<std::string> params = {})
 {
    return {.priority = priority, .target = std::move(target), .params = std::move(params)};
 }
 
-ServiceRecords found(std::string owner, std::vector<c_ares_async::https_record> records,
-                     bool aliased = false)
+ServiceRecords found(std::vector<c_ares_async::https_record> records,
+                     std::string owner = "example.com", bool aliased = false)
 {
    return {.owner = std::move(owner), .aliased = aliased, .records = std::move(records)};
 }
@@ -42,73 +38,37 @@ std::vector<std::string> routes(const Plan& plan)
 
 // =================================================================================================
 
-TEST(Origin, TakesThePortOfTheScheme)
+TEST(NormalizeHost, ComparesHostsTheWayDnsDoes)
 {
-   EXPECT_EQ(origin("http://example.com/x").port, 80);
-   EXPECT_EQ(origin("https://example.com/x").port, 443);
-   EXPECT_EQ(origin("https://example.com:8443/x").port, 8443);
+   EXPECT_EQ(normalize_host("EXAMPLE.com."), "example.com");
 }
 
-TEST(Origin, ComparesHostsTheWayDnsDoes)
+TEST(ToText, ReadsLikeAZoneFile)
 {
-   EXPECT_EQ(origin("https://EXAMPLE.com./").host, "example.com");
-}
-
-TEST(Origin, KnowsAnAddressFromAName)
-{
-   EXPECT_FALSE(origin("http://example.com/").is_address);
-   EXPECT_TRUE(origin("http://127.0.0.1/").is_address);
-   EXPECT_TRUE(origin("http://[::1]/").is_address);
-}
-
-TEST(Origin, HasNoneForOtherSchemes)
-{
-   EXPECT_FALSE(origin_of(boost::urls::url("ftp://example.com/")));
-   EXPECT_FALSE(origin_of(boost::urls::url("mailto:someone@example.com")));
-}
-
-TEST(QueryName, IsTheHostOnTheDefaultPort)
-{
-   EXPECT_EQ(https_query_name(origin("https://example.com/")), "example.com");
-   EXPECT_EQ(https_query_name(origin("https://example.com:443/")), "example.com");
-}
-
-TEST(QueryName, HasAPortPrefixOnAnyOther)
-{
-   EXPECT_EQ(https_query_name(origin("https://example.com:8443/")), "_8443._https.example.com");
-}
-
-TEST(QueryName, IsThatOfTheHttpsFormForHttp)
-{
-   EXPECT_EQ(https_query_name(origin("http://example.com/")), "example.com");
-   EXPECT_EQ(https_query_name(origin("http://example.com:80/")), "example.com");
-   EXPECT_EQ(https_query_name(origin("http://example.com:8080/")), "_8080._https.example.com");
+   EXPECT_EQ(to_text(record(1, ".", {"alpn=h3", "port=8443"})), "HTTPS 1 . alpn=h3 port=8443");
+   EXPECT_EQ(to_text(record(0, "other.example")), "HTTPS 0 other.example");
+   EXPECT_EQ(to_text(record(1, "")), "HTTPS 1 .");
 }
 
 // -------------------------------------------------------------------------------------------------
 
 TEST(Plan, ConnectsOverHttp3WhereTheRecordOffersIt)
 {
-   const auto plan = plan_routes(origin("https://example.com/"),
-                                 found("example.com", {record(1, ".", {"alpn=h3,h2"})}));
+   const auto plan = plan_routes("example.com", found({record(1, ".", {"alpn=h3,h2"})}));
 
    EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:443"));
-   EXPECT_EQ(plan.origin.scheme, "https");
 }
 
 TEST(Plan, GoesToThePortOfTheRecord)
 {
-   const auto plan = plan_routes(origin("https://example.com/"),
-                                 found("example.com", {record(1, ".", {"alpn=h3", "port=8443"})}));
+   const auto plan = plan_routes("example.com", found({record(1, ".", {"alpn=h3", "port=8443"})}));
 
    EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:8443"));
-   EXPECT_EQ(plan.origin.port, 443) << "requests still go to the origin";
 }
 
 TEST(Plan, TriesTheLowestPriorityFirst)
 {
-   const auto plan = plan_routes(origin("https://example.com/"),
-                                 found("example.com", {record(3, ".", {"alpn=h3", "port=3"}),
+   const auto plan = plan_routes("example.com", found({record(3, ".", {"alpn=h3", "port=3"}),
                                                        record(1, ".", {"alpn=h3", "port=1"}),
                                                        record(2, ".", {"alpn=h3", "port=2"})}));
 
@@ -118,9 +78,9 @@ TEST(Plan, TriesTheLowestPriorityFirst)
 
 TEST(Plan, RejectsARecordWithoutHttp3)
 {
-   const auto plan = plan_routes(origin("https://example.com/"),
-                                 found("example.com", {record(1, ".", {"alpn=h2"}),
-                                                       record(2, ".", {"alpn=h3", "port=8443"})}));
+   const auto plan =
+      plan_routes("example.com",
+                  found({record(1, ".", {"alpn=h2"}), record(2, ".", {"alpn=h3", "port=8443"})}));
 
    EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:8443"));
    ASSERT_EQ(plan.rejected.size(), 1u);
@@ -128,55 +88,59 @@ TEST(Plan, RejectsARecordWithoutHttp3)
    EXPECT_THAT(plan.rejected[0], HasSubstr("TLS over TCP"));
 }
 
-TEST(Plan, HasNoRouteToAnHttpsOriginWithoutARecord)
+TEST(Plan, HasNoRouteWithoutARecord)
 {
-   const auto plan = plan_routes(origin("https://example.com/"), found("example.com", {}));
+   const auto plan = plan_routes("example.com", found({}));
 
    EXPECT_THAT(plan.routes, IsEmpty());
    ASSERT_EQ(plan.rejected.size(), 1u);
    EXPECT_THAT(plan.rejected[0], HasSubstr("TLS over TCP"));
 }
 
-TEST(Plan, RejectsATargetOtherThanTheOrigin)
+TEST(Plan, RejectsATargetOtherThanTheHost)
 {
    //
    // The certificate has to be valid for the origin (section 9.1), and anyhttp would check it
    // against what it connects to.
    //
-   const auto plan = plan_routes(origin("https://example.com/"),
-                                 found("example.com", {record(1, "cdn.example.net", {"alpn=h3"})}));
+   const auto plan = plan_routes("example.com", found({record(1, "cdn.example.net", {"alpn=h3"})}));
 
    EXPECT_THAT(plan.routes, IsEmpty());
    ASSERT_EQ(plan.rejected.size(), 1u);
    EXPECT_THAT(plan.rejected[0], HasSubstr("cdn.example.net"));
 }
 
-TEST(Plan, TakesAnExplicitTargetThatIsTheOrigin)
+TEST(Plan, TakesAnExplicitTargetThatIsTheHost)
 {
-   const auto plan =
-      plan_routes(origin("https://example.com:8443/"),
-                  found("_8443._https.example.com", {record(1, "EXAMPLE.com.", {"alpn=h3"})}));
+   const auto plan = plan_routes("example.com", found({record(1, "EXAMPLE.com.", {"alpn=h3"})}));
 
-   EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:8443"));
+   EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:443"));
 }
 
-TEST(Plan, TakesTheOwnNameOfAPortPrefixedRecordLiterally)
+TEST(Plan, TakesTheOwnNameOfARecordAtTheEndOfAnAliasAsThatName)
 {
    //
-   // "." is the owner name, section 2.5.2, and that includes the prefix.
+   // "." is the owner name, section 2.5.2, and that is not the host any more.
    //
-   const auto plan = plan_routes(origin("https://example.com:8443/"),
-                                 found("_8443._https.example.com", {record(1, ".", {"alpn=h3"})}));
+   const auto plan =
+      plan_routes("example.com", found({record(1, ".", {"alpn=h3"})}, "other.example", true));
+
+   EXPECT_THAT(plan.routes, IsEmpty());
+   EXPECT_THAT(plan.rejected.front(), HasSubstr("other.example"));
+}
+
+TEST(Plan, SaysSoAboutTheTargetOfAnAlias)
+{
+   const auto plan = plan_routes("example.com", found({}, "other.example", true));
 
    EXPECT_THAT(plan.routes, IsEmpty());
    ASSERT_EQ(plan.rejected.size(), 1u);
-   EXPECT_THAT(plan.rejected[0], HasSubstr("_8443._https.example.com"));
+   EXPECT_THAT(plan.rejected[0], HasSubstr("other.example"));
 }
 
 TEST(Plan, HasNoDefaultSetToFallBackOnWithNoDefaultAlpn)
 {
-   const auto plan = plan_routes(origin("https://example.com/"),
-                                 found("example.com", {record(1, ".", {"no-default-alpn"})}));
+   const auto plan = plan_routes("example.com", found({record(1, ".", {"no-default-alpn"})}));
 
    EXPECT_THAT(plan.routes, IsEmpty());
 }
@@ -184,9 +148,8 @@ TEST(Plan, HasNoDefaultSetToFallBackOnWithNoDefaultAlpn)
 TEST(Plan, IgnoresARecordWithAMandatoryKeyItDoesNotKnow)
 {
    const auto plan =
-      plan_routes(origin("https://example.com/"),
-                  found("example.com",
-                        {record(1, ".", {"mandatory=alpn,key65280", "alpn=h3", "key65280=01"})}));
+      plan_routes("example.com",
+                  found({record(1, ".", {"mandatory=alpn,key65280", "alpn=h3", "key65280=01"})}));
 
    EXPECT_THAT(plan.routes, IsEmpty());
    EXPECT_THAT(plan.rejected.front(), HasSubstr("key65280"));
@@ -195,8 +158,7 @@ TEST(Plan, IgnoresARecordWithAMandatoryKeyItDoesNotKnow)
 TEST(Plan, IgnoresARecordThatRequiresEch)
 {
    const auto plan =
-      plan_routes(origin("https://example.com/"),
-                  found("example.com", {record(1, ".", {"mandatory=ech", "alpn=h3", "ech=dead"})}));
+      plan_routes("example.com", found({record(1, ".", {"mandatory=ech", "alpn=h3", "ech=dead"})}));
 
    EXPECT_THAT(plan.routes, IsEmpty());
 }
@@ -204,70 +166,23 @@ TEST(Plan, IgnoresARecordThatRequiresEch)
 TEST(Plan, AcceptsMandatoryKeysItCanLeaveAlone)
 {
    const auto plan = plan_routes(
-      origin("https://example.com/"),
-      found("example.com",
-            {record(1, ".", {"mandatory=alpn,ipv4hint", "alpn=h3", "ipv4hint=192.0.2.1"})}));
+      "example.com",
+      found({record(1, ".", {"mandatory=alpn,ipv4hint", "alpn=h3", "ipv4hint=192.0.2.1"})}));
 
    EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:443"));
 }
 
 TEST(Plan, IgnoresARecordWithAnInvalidPort)
 {
-   const auto plan = plan_routes(origin("https://example.com/"),
-                                 found("example.com", {record(1, ".", {"alpn=h3", "port=x"})}));
+   const auto plan = plan_routes("example.com", found({record(1, ".", {"alpn=h3", "port=x"})}));
 
    EXPECT_THAT(plan.routes, IsEmpty());
 }
 
-// -------------------------------------------------------------------------------------------------
-
-TEST(Plan, ConnectsInTheClearToAnHttpOriginWithoutARecord)
+TEST(Plan, PassesOnWhatWentWrongInTheLookup)
 {
-   const auto plan =
-      plan_routes(origin("http://example.com:8080/"), found("_8080._https.example.com", {}));
+   auto records = found({});
+   records.notes.push_back("HTTPS lookup failed");
 
-   EXPECT_THAT(routes(plan), ElementsAre("h1 example.com:8080"));
-   EXPECT_EQ(plan.origin.scheme, "http");
-}
-
-TEST(Plan, UpgradesAnHttpOriginWithARecord)
-{
-   const auto plan = plan_routes(origin("http://example.com/"),
-                                 found("example.com", {record(1, ".", {"alpn=h3"})}));
-
-   EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:443"));
-   EXPECT_EQ(plan.origin.scheme, "https");
-   EXPECT_EQ(plan.origin.port, 443);
-}
-
-TEST(Plan, DoesNotFallBackToCleartextAfterAnUpgrade)
-{
-   const auto plan = plan_routes(origin("http://example.com/"),
-                                 found("example.com", {record(1, ".", {"alpn=h2"})}));
-
-   EXPECT_THAT(plan.routes, IsEmpty());
-   EXPECT_EQ(plan.origin.scheme, "https");
-}
-
-TEST(Plan, DoesNotUpgradeForAnIncompatibleRecord)
-{
-   //
-   // Section 9.5: only a compatible record, or an alias.
-   //
-   const auto plan = plan_routes(
-      origin("http://example.com/"),
-      found("example.com", {record(1, ".", {"mandatory=key65280", "alpn=h3", "key65280=01"})}));
-
-   EXPECT_THAT(routes(plan), ElementsAre("h1 example.com:80"));
-   EXPECT_EQ(plan.origin.scheme, "http");
-}
-
-TEST(Plan, UpgradesAnHttpOriginWithAnAlias)
-{
-   const auto plan = plan_routes(origin("http://example.com/"),
-                                 found("alias.example.net", {}, /* aliased */ true));
-
-   EXPECT_THAT(plan.routes, IsEmpty());
-   EXPECT_EQ(plan.origin.scheme, "https");
-   EXPECT_THAT(plan.rejected.front(), HasSubstr("alias.example.net"));
+   EXPECT_THAT(plan_routes("example.com", records).rejected.front(), "HTTPS lookup failed");
 }

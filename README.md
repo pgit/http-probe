@@ -1,7 +1,7 @@
 # crawler
 
-A simple web crawler on [anyhttp](https://github.com/pgit/anyhttp) (HTTP/1.1, HTTP/2 and HTTP/3) and
-[c-ares-async](https://github.com/pgit/c-ares-async) (DNS).
+Requests hosts the way their HTTPS records say, on [anyhttp](https://github.com/pgit/anyhttp) (HTTP) and
+[c-ares-async](https://github.com/pgit/c-ares-async) (DNS). Despite the name, it does not crawl.
 
 > [!WARNING]
 > This repository is purely experimental. It is not meant for production use, and anything in it
@@ -11,18 +11,19 @@ A simple web crawler on [anyhttp](https://github.com/pgit/anyhttp) (HTTP/1.1, HT
 ## What it does
 
 ```sh
-crawler --allow example.com https://example.com/
+crawler example.com www.example.org
+crawler --file hostnames.txt
 ```
 
-It starts from the URLs given and follows links, one request at a time, breadth first. It refuses to
-run without `--allow`, and only ever connects to the hosts named there, by their exact names. Each
-host gets its `robots.txt` read first, and requests to it are at least `--delay-ms` apart, or further
-if its `Crawl-delay` says so. `crawler` without arguments lists the options.
+It requests `https://<host>/` once for each host, in turn, and prints the status, the route, the time
+it took and the header fields of the response, along with the host's HTTPS records. A redirect is
+reported and not followed, and nothing else on the host is requested, `robots.txt` included.
+`crawler` without arguments lists the options. The exit code is 0 if every host answered, whatever
+the status.
 
 How to connect is up to the host's HTTPS records in DNS ([RFC 9460](https://www.rfc-editor.org/rfc/rfc9460)):
 aliases are followed, a record has to be compatible, and the lowest priority goes first. The port
-comes from the record, and an `http://` URL with a record is treated as `https://`, without going
-back to cleartext.
+comes from the record.
 
 What can be used of that is limited by what anyhttp's client does so far:
 
@@ -31,8 +32,7 @@ What can be used of that is limited by what anyhttp's client does so far:
 | a record with `h3` in its ALPN set        | HTTP/3, to the port of the record             |
 | a record without `h3`                     | rejected: needs TLS over TCP                  |
 | a record with a target that is not itself | rejected: can't verify one name and connect to another |
-| no record, on an `https://` URL           | rejected: needs TLS over TCP                  |
-| no record, on an `http://` URL            | HTTP/1.1 in the clear, to the addresses from c-ares |
+| no record                                 | rejected: needs TLS over TCP                  |
 
 Every rejection is printed with its reason. Over HTTP/3, the address comes from anyhttp's own resolver
 and not from c-ares, so `--dns-server` and the address hints in the record do not apply to it.
@@ -42,7 +42,7 @@ The resolver in the devcontainer may answer with no data for HTTPS records, even
 `--dns-server` is what gets around that.
 
 To see it work without going anywhere, `demo_site` runs a site and a DNS server on loopback, and
-prints the command to crawl them with:
+prints the command to request it with:
 
 ```sh
 ./build/test/demo_site

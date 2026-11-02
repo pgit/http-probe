@@ -1,17 +1,12 @@
 //
-// From the HTTPS records of a name to the ways of connecting to an origin (RFC 9460). No I/O in
-// here: crawler.cpp asks the questions, this says what the answers mean.
+// From the HTTPS records of a name to the ways of connecting to it (RFC 9460). No I/O in here:
+// prober.cpp asks the questions, this says what the answers mean.
 //
 #pragma once
 
-#include <anyhttp/common.hpp>
-
 #include <c_ares_async/resolver.hpp>
 
-#include <boost/url/url_view.hpp>
-
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,26 +19,12 @@ namespace crawler
 /// Lower case and without the dot at the end, which is how host names are compared.
 std::string normalize_host(std::string_view host);
 
-struct Origin
-{
-   std::string scheme; ///< "http" or "https"
-   std::string host; ///< as normalize_host() makes it
-   std::uint16_t port = 0; ///< never empty: the default of the scheme, if the URL has none
-   bool is_address = false; ///< the host is an IP address, which has no DNS records to look up
-
-   std::string key() const; ///< "scheme://host:port"
-};
-
-/// The origin of an "http" or "https" URL that has a host, and nothing for any other.
-std::optional<Origin> origin_of(boost::urls::url_view url);
-
-/// The name to ask for an origin's HTTPS records: of the origin in its "https" form (section 9.5),
-/// with a port prefix unless that is on 443 (section 9.1), as in "_8443._https.example.com".
-std::string https_query_name(const Origin& origin);
+/// A record the way a zone file has it, without the name: "HTTPS 1 . alpn=h3 port=8443".
+std::string to_text(const c_ares_async::https_record& record);
 
 // -------------------------------------------------------------------------------------------------
 
-/// What SVCB resolution (section 3) found for one origin.
+/// What SVCB resolution (section 3) found for a host.
 struct ServiceRecords
 {
    std::string owner; ///< the name the records are of, at the end of any alias chain
@@ -52,38 +33,32 @@ struct ServiceRecords
    std::vector<std::string> notes; ///< what went wrong on the way, none of which is fatal
 };
 
-/// One way of connecting. The TLS name and the "Host" stay those of the origin, whatever this says.
+/// One way of connecting, which is HTTP/3 so far. The TLS name and the authority stay the host's.
 struct Route
 {
-   anyhttp::Protocol protocol = anyhttp::Protocol::h1;
    std::string host; ///< the name to connect to
-   std::uint16_t port = 0;
-   std::string source; ///< what led to this route, for people to read
+   std::uint16_t port = 443;
+   std::string source; ///< the record that led to this route
 
-   std::string to_string() const; ///< "h3 example.com:443", or "h1 example.com:80"
+   std::string to_string() const; ///< "h3 example.com:443"
 };
 
-/// How to reach an origin.
+/// How to reach a host.
 struct Plan
 {
-   Origin origin; ///< the one to send requests for: "https" where the records say so (section 9.5)
    std::vector<Route> routes; ///< in the order to try them; empty if there is no usable way
    std::vector<std::string> rejected; ///< what the records offered, or we knew of, and why not
 };
 
 /**
- * Says how to connect to \p origin, given what was found for it.
+ * Says how to connect to https://\p host/, given what was found for it.
  *
- * What is usable is limited by anyhttp as much as by the records. TLS exists on HTTP/3 only, so an
- * "https" origin can be reached through a record that has "h3" in its ALPN set and in no other way.
- * And anyhttp verifies the certificate against the host it connects to, while RFC 9460 (section
- * 9.1) wants that to be the origin, so a record is usable only if it stays on the origin's name.
- *
- * An "http" origin is reached in the clear, over HTTP/1.1, unless it has an alias or a compatible
- * record. Those mean it is to be treated as "https" (section 9.5), with no way back to cleartext
- * if the result turns out not to be usable.
+ * What is usable is limited by anyhttp as much as by the records. TLS exists on HTTP/3 only, so
+ * a host can be reached through a record that has "h3" in its ALPN set and in no other way. And
+ * anyhttp verifies the certificate against the host it connects to, while RFC 9460 (section 9.1)
+ * wants that to be the origin, so a record is usable only if it stays on the host's own name.
  */
-Plan plan_routes(const Origin& origin, const ServiceRecords& found);
+Plan plan_routes(std::string_view host, const ServiceRecords& found);
 
 // =================================================================================================
 

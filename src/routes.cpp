@@ -1,7 +1,5 @@
 #include "routes.hpp"
 
-#include <boost/url/scheme.hpp>
-
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -85,28 +83,7 @@ Service parse_service(const c_ares_async::https_record& record)
    return service;
 }
 
-std::string to_text(const c_ares_async::https_record& record)
-{
-   auto text =
-      std::format("HTTPS {} {}", record.priority, record.target.empty() ? "." : record.target);
-   for (const auto& param : record.params)
-      text += " " + param;
-   return text;
-}
-
 bool is_own_name(std::string_view target) { return target.empty() || target == "."; }
-
-Origin https_form(const Origin& origin)
-{
-   if (origin.scheme == "https")
-      return origin;
-
-   auto result = origin;
-   result.scheme = "https";
-   if (result.port == 80)
-      result.port = 443; // section 9.5, step 2
-   return result;
-}
 
 // =================================================================================================
 
@@ -122,82 +99,46 @@ std::string normalize_host(std::string_view host)
    return result;
 }
 
-std::string Origin::key() const { return std::format("{}://{}:{}", scheme, host, port); }
-
-std::optional<Origin> origin_of(boost::urls::url_view url)
+std::string to_text(const c_ares_async::https_record& record)
 {
-   const auto scheme = url.scheme_id();
-   if ((scheme != boost::urls::scheme::http && scheme != boost::urls::scheme::https) ||
-       url.encoded_host().empty())
-      return std::nullopt;
-
-   const auto https = scheme == boost::urls::scheme::https;
-   return Origin{.scheme = https ? "https" : "http",
-                 .host = normalize_host(url.host_address()),
-                 .port = url.has_port() ? url.port_number() : std::uint16_t(https ? 443 : 80),
-                 .is_address = url.host_type() != boost::urls::host_type::name};
+   auto text =
+      std::format("HTTPS {} {}", record.priority, record.target.empty() ? "." : record.target);
+   for (const auto& param : record.params)
+      text += " " + param;
+   return text;
 }
 
-std::string https_query_name(const Origin& origin)
-{
-   const auto https = https_form(origin);
-   return https.port == 443 ? https.host : std::format("_{}._https.{}", https.port, https.host);
-}
+std::string Route::to_string() const { return std::format("h3 {}:{}", host, port); }
 
-std::string Route::to_string() const
+Plan plan_routes(std::string_view host, const ServiceRecords& found)
 {
-   return std::format("{} {}:{}", protocol == anyhttp::Protocol::h3 ? "h3" : "h1", host, port);
-}
-
-Plan plan_routes(const Origin& origin, const ServiceRecords& found)
-{
-   Plan plan{.origin = origin, .routes = {}, .rejected = found.notes};
+   Plan plan{.rejected = found.notes};
 
    auto records = found.records;
    std::ranges::stable_sort(records, {}, &c_ares_async::https_record::priority);
 
-   std::vector<std::pair<c_ares_async::https_record, Service>> compatible;
+   bool any_compatible = false;
    for (const auto& record : records)
    {
-      auto service = parse_service(record);
-      if (service.incompatible)
-         plan.rejected.push_back(std::format("{}: {}", to_text(record), *service.incompatible));
-      else
-         compatible.emplace_back(record, std::move(service));
-   }
-
-   //
-   // Without anything that applies, an "http" origin is simply that. There is nothing to choose
-   // from: anyhttp does not negotiate h2c, and speaking HTTP/2 to a cleartext port unasked is not
-   // something to do to a server.
-   //
-   if (origin.scheme == "http" && !found.aliased && compatible.empty())
-   {
-      plan.routes.push_back(Route{.protocol = anyhttp::Protocol::h1,
-                                  .host = origin.host,
-                                  .port = origin.port,
-                                  .source = "no HTTPS record"});
-      return plan;
-   }
-
-   plan.origin = https_form(origin);
-
-   for (const auto& [record, service] : compatible)
-   {
       const auto text = to_text(record);
-      const auto target = normalize_host(is_own_name(record.target) ? found.owner : record.target);
+      const auto service = parse_service(record);
+      if (service.incompatible)
+      {
+         plan.rejected.push_back(std::format("{}: {}", text, *service.incompatible));
+         continue;
+      }
+      any_compatible = true;
 
+      const auto target = normalize_host(is_own_name(record.target) ? found.owner : record.target);
       if (!service.offers("h3"))
          plan.rejected.push_back(std::format("{}: {}", text, no_tls_over_tcp));
-      else if (target != plan.origin.host)
-         plan.rejected.push_back(std::format("{}: target '{}' is not the origin, and anyhttp can "
-                                             "only verify the name it connects to",
-                                             text, target));
+      else if (target != host)
+         plan.rejected.push_back(std::format(
+            "{}: target '{}' is not the host, and anyhttp can only verify the name it connects to",
+            text, target));
       else
-         plan.routes.push_back(Route{.protocol = anyhttp::Protocol::h3,
-                                     .host = target,
-                                     .port = service.port.value_or(plan.origin.port),
-                                     .source = text});
+         plan.routes.push_back(
+            Route{.host = target, .port = service.port.value_or(443), .source = text});
    }
 
    //
@@ -208,9 +149,8 @@ Plan plan_routes(const Origin& origin, const ServiceRecords& found)
    if (found.aliased)
       plan.rejected.push_back(
          std::format("alias target '{}' without parameters: {}", found.owner, no_tls_over_tcp));
-   else if (compatible.empty())
-      plan.rejected.push_back(
-         std::format("{} without a usable HTTPS record: {}", origin.key(), no_tls_over_tcp));
+   else if (!any_compatible)
+      plan.rejected.push_back(std::format("no usable HTTPS record: {}", no_tls_over_tcp));
 
    return plan;
 }

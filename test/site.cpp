@@ -17,8 +17,7 @@ namespace crawler::test
 
 // =================================================================================================
 
-Site::Site(const anyhttp::Executor& executor, const std::string& listen_address)
-   : requests_(std::make_shared<std::vector<Request>>())
+Site::Site(const anyhttp::Executor& executor) : requests_(std::make_shared<std::vector<Request>>())
 {
    auto directory = (std::filesystem::temp_directory_path() / "crawler-test-XXXXXX").string();
    if (!mkdtemp(directory.data()))
@@ -31,7 +30,10 @@ Site::Site(const anyhttp::Executor& executor, const std::string& listen_address)
    std::ofstream(certificate_file_) << certificate.certificate_pem;
    std::ofstream(key_file_) << certificate.key_pem;
 
-   server_.emplace(executor, anyhttp::server::Config{.listen_address = listen_address,
+   //
+   // "::" takes IPv4 as well, and "localhost" may be either.
+   //
+   server_.emplace(executor, anyhttp::server::Config{.listen_address = "::",
                                                      .port = 0,
                                                      .tls_certificate_chain = certificate_file_,
                                                      .tls_private_key = key_file_});

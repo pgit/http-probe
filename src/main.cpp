@@ -1,7 +1,7 @@
 //
-// crawler --allow HOST [--allow HOST ...] [options] URL...
+// crawler [options] HOST...
 //
-#include "crawler.hpp"
+#include "prober.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
@@ -10,8 +10,9 @@
 
 #include <charconv>
 #include <chrono>
-#include <cstddef>
 #include <exception>
+#include <format>
+#include <fstream>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -21,29 +22,18 @@
 namespace
 {
 
-constexpr std::string_view usage =
-   R"(usage: crawler --allow HOST [--allow HOST ...] [options] URL...
+constexpr std::string_view usage = R"(usage: crawler [options] HOST...
+       crawler [options] --file LIST
 
-Crawls the URLs and what they link to, on the given hosts only. How to connect to a host is up to
-its HTTPS records in DNS (RFC 9460).
+Requests https://HOST/ once for each host name and prints the status and header fields of the
+response. How to connect is up to the host's HTTPS records in DNS (RFC 9460). Redirects are reported
+and not followed, and nothing else on the host is requested.
 
-  --allow HOST        a host that may be connected to, by its exact name; at least one is required
+  --file LIST         read the hosts from a file, one per line, as names or as URLs
   --dns-server ADDR   the DNS server to ask, like 192.0.2.1 or 192.0.2.1:5353; default: the system's
   --ca-file PEM       the CA certificates to verify servers with; default: the system's
-  --max-pages N       the most pages to request; default: 100
-  --delay-ms N        the least time between two requests to a host; default: 1000
   --timeout-ms N      how long one request may take; default: 10000
 )";
-
-template <typename T>
-T number(std::string_view option, std::string_view text)
-{
-   T value{};
-   const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
-   if (ec != std::errc{} || end != text.data() + text.size())
-      throw std::invalid_argument(std::format("{}: '{}' is not a number", option, text));
-   return value;
-}
 
 crawler::Config parse_arguments(int argc, char* argv[])
 {
@@ -53,7 +43,7 @@ crawler::Config parse_arguments(int argc, char* argv[])
       const std::string_view argument = argv[i];
       if (!argument.starts_with("-"))
       {
-         config.seeds.emplace_back(argument);
+         config.hosts.emplace_back(argument);
          continue;
       }
 
@@ -61,22 +51,49 @@ crawler::Config parse_arguments(int argc, char* argv[])
          throw std::invalid_argument(std::format("{} needs a value, or is unknown", argument));
       const std::string_view value = argv[++i];
 
-      if (argument == "--allow")
-         config.allowed_hosts.emplace_back(value);
+      if (argument == "--file")
+      {
+         std::ifstream list{std::string(value)};
+         if (!list)
+            throw std::invalid_argument(std::format("can't read '{}'", value));
+         std::vector<std::string> skipped;
+         config.hosts.append_range(crawler::read_hosts(list, skipped));
+         for (const auto& line : skipped)
+            std::println(stderr, "crawler: skipping '{}': not a host name", line);
+      }
       else if (argument == "--dns-server")
          config.dns_server = value;
       else if (argument == "--ca-file")
          config.tls_ca_file = value;
-      else if (argument == "--max-pages")
-         config.max_pages = number<std::size_t>(argument, value);
-      else if (argument == "--delay-ms")
-         config.delay = std::chrono::milliseconds(number<unsigned>(argument, value));
       else if (argument == "--timeout-ms")
-         config.timeout = std::chrono::milliseconds(number<unsigned>(argument, value));
+      {
+         unsigned milliseconds = 0;
+         const auto [end, ec] =
+            std::from_chars(value.data(), value.data() + value.size(), milliseconds);
+         if (ec != std::errc{} || end != value.data() + value.size())
+            throw std::invalid_argument(std::format("{}: '{}' is not a number", argument, value));
+         config.timeout = std::chrono::milliseconds(milliseconds);
+      }
       else
          throw std::invalid_argument(std::format("unknown option '{}'", argument));
    }
    return config;
+}
+
+void print(const crawler::Result& result)
+{
+   if (result.error.empty())
+      std::println("{}: {} [{}] {} bytes in {}", result.host, result.status, result.route,
+                   result.body_size, result.duration);
+   else
+      std::println("{}: failed: {}", result.host, result.error);
+
+   for (const auto& record : result.records)
+      std::println("  record: {}", crawler::to_text(record));
+   for (const auto& note : result.notes)
+      std::println("  note: {}", note);
+   for (const auto& [name, value] : result.fields)
+      std::println("  {}: {}", name, value);
 }
 
 } // namespace
@@ -85,36 +102,17 @@ int main(int argc, char* argv[])
 {
    spdlog::set_level(spdlog::level::err); // anyhttp logs through the default logger
 
-   std::size_t fetched = 0;
-   const auto report = [&](const crawler::Event& event) {
-      using Kind = crawler::Event::Kind;
-      switch (event.kind)
-      {
-      case Kind::fetched:
-         ++fetched;
-         std::println("{} {} [{}] {}", event.status, event.url, event.route, event.detail);
-         break;
-      case Kind::failed:
-         std::println("failed {}: {}", event.url, event.detail);
-         break;
-      case Kind::disallowed:
-         std::println("disallowed by robots.txt: {}", event.url);
-         break;
-      case Kind::outside_allowlist:
-         std::println("not allowed: {}", event.url);
-         break;
-      case Kind::note:
-         std::println("# {}: {}{}", event.url,
-                      event.route.empty() ? "" : std::format("[{}] ", event.route), event.detail);
-         break;
-      }
+   bool all_answered = true;
+   const auto report = [&](const crawler::Result& result) {
+      all_answered = all_answered && result.error.empty();
+      print(result);
    };
 
    try
    {
       boost::asio::io_context context;
-      crawler::Crawler crawl(context.get_executor(), parse_arguments(argc, argv), report);
-      boost::asio::co_spawn(context, crawl.run(), [](const std::exception_ptr& ex) {
+      crawler::Prober prober(context.get_executor(), parse_arguments(argc, argv), report);
+      boost::asio::co_spawn(context, prober.run(), [](const std::exception_ptr& ex) {
          if (ex)
             std::rethrow_exception(ex);
       });
@@ -131,5 +129,5 @@ int main(int argc, char* argv[])
       return 1;
    }
 
-   return fetched > 0 ? 0 : 1;
+   return all_answered ? 0 : 1;
 }

@@ -1,6 +1,6 @@
 //
-// A small site on loopback, with an HTTPS record that sends the crawler to it over HTTP/3, and the
-// command to crawl it with. Runs for as long as it takes to stop it.
+// A site on loopback, with an HTTPS record that sends the program to it over HTTP/3, and the
+// command to request it with. Runs for as long as it takes to stop it.
 //
 #include "site.hpp"
 
@@ -24,15 +24,10 @@ int main()
                           {static_cast<unsigned char>(site.port() >> 8),
                            static_cast<unsigned char>(site.port() & 0xff)}}});
 
-   site.page("/robots.txt",
-             {.body = "User-agent: *\nDisallow: /private/\n", .content_type = "text/plain"});
-   site.page("/", {.body = R"(<a href="/about">about</a> <a href="/private/x">private</a>
-                              <a href="https://www.example.test/">elsewhere</a>)"});
-   site.page("/about", {.body = R"(<a href="/">home</a> <a href="/gone">gone</a>)"});
+   site.page("/", {.body = "<p>hello</p>"});
 
-   std::println("crawler --allow localhost --dns-server {} --ca-file {} --delay-ms 100 "
-                "https://localhost/",
-                site.dns_address(), site.ca_file().string());
+   std::println("crawler --dns-server {} --ca-file {} localhost", site.dns_address(),
+                site.ca_file().string());
    std::fflush(stdout);
 
    boost::asio::signal_set signals(context, SIGINT, SIGTERM);

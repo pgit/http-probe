@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.30)
-project(crawler VERSION 0.0.1 DESCRIPTION "A web crawler on anyhttp and c-ares-async" LANGUAGES C CXX)
+project(crawler VERSION 0.0.1 DESCRIPTION "Requests hosts the way their HTTPS records say, on anyhttp and c-ares-async" LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED On)
@@ -56,12 +56,12 @@ FetchContent_MakeAvailable(anyhttp c_ares_async)
 # --------------------------------------------------------------------------------------------------
 
 #
-# The crawler in a library of its own, for the tests to link. The warnings are not for the sources
+# The program in a library of its own, for the tests to link. The warnings are not for the sources
 # from c-ares-async that the tests borrow, see test/CMakeLists.txt.
 #
 set(crawler_warnings -Wall -Wextra -Werror -Wno-missing-designated-field-initializers)
 
-add_library(crawler_core STATIC src/crawler.cpp src/links.cpp src/robots.cpp src/routes.cpp)
+add_library(crawler_core STATIC src/prober.cpp src/routes.cpp)
 target_include_directories(crawler_core PUBLIC src)
 target_link_libraries(crawler_core PUBLIC anyhttp::anyhttp c_ares_async::c_ares_async)
 target_compile_options(crawler_core PRIVATE ${crawler_warnings})

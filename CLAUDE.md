@@ -1,25 +1,27 @@
 # Working on the crawler
 
-A web crawler on two libraries of the same author, each in a repository of its own: anyhttp for HTTP
-and c-ares-async for DNS. [README.md](README.md) has the presets and the build commands.
+Despite the name it does not crawl: it requests `https://<host>/` once per host and reports what
+came back, connecting the way the host's HTTPS records say. It is built on two libraries of the same
+author, each in a repository of its own: anyhttp for HTTP and c-ares-async for DNS.
+[README.md](README.md) has the presets and the build commands.
 
 ## Safety rules
 
 These hold for all code in this repository, including tests and experiments.
 
-- **Never open, fetch or connect to anything in c-ares-async's `url_list.txt`, and never use it as
-  input.** It is for DNS lookups only: 1000 mixed sites, some adult or spam-looking. The crawler is
-  the first program here that could turn those names into connections.
-- **Tests crawl local servers on loopback only.**
-- **Once the program crawls, it refuses to run without an explicit host allowlist.** robots.txt and
-  per-host rate limits are built in from the start, not added later.
+- **One request per host, and nothing more.** c-ares-async's lists of hosts are fine as input here,
+  which is what makes this rule matter: they have 1000 mixed sites, some adult or spam-looking. So
+  nothing is followed: no links and no redirects.
+- **Tests connect to local servers on loopback only.**
+- **If the program ever crawls, it refuses to run without an explicit host allowlist,** with
+  robots.txt and per-host rate limits built in from the start, not added later.
 - **Run tests and programs under `timeout -s KILL`**, 5 seconds per test. Never let a suite sit on a
   hang.
 
 ## The code
 
 [routes.cpp](src/routes.cpp) says what the HTTPS records of a name mean for how to connect, without
-any I/O, and [crawler.cpp](src/crawler.cpp) does the rest. The tests in [test/](test) run against
+any I/O, and [prober.cpp](src/prober.cpp) does the rest. The tests in [test/](test) run against
 [Site](test/site.hpp), a real anyhttp server and a DNS server with a zone of its own, on loopback.
 
 ## The libraries
