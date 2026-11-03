@@ -42,12 +42,10 @@ set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
 # there is the 'dev' preset, which sets FETCHCONTENT_SOURCE_DIR_*. SYSTEM, so that the warnings of
 # this project do not apply to the headers of the libraries.
 #
-# anyhttp: the head of branch 'packaging', move this to master once that is merged
-#
 include(FetchContent)
 FetchContent_Declare(anyhttp
     GIT_REPOSITORY https://github.com/pgit/anyhttp.git
-    GIT_TAG af39b5c71490978d545c1b47ee8e149f9a7082c9
+    GIT_TAG 9c7627d78cc350376e6f2e6872b251d854a565d8
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
