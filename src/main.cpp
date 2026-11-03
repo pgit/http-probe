@@ -35,14 +35,14 @@ namespace
 constexpr std::string_view about = R"(usage: http-probe [options] HOST...
        http-probe [options] --file LIST
 
-Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once from those that
-offer HTTP/3, printing the status and header fields of the response. Redirects are reported and not
-followed, and nothing else on the host is requested.
+Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once, the way they
+say or over TCP on port 443 if they don't, printing the status and header fields of the response.
+Redirects are reported and not followed, and nothing else on the host is requested.
 )";
 
 constexpr std::string_view exit_code = R"(
-The exit code is 0 if every host with HTTP/3 answered, whatever the status, and every lookup got an
-answer.
+The exit code is 0 if every host that was connected to answered, whatever the status, and every
+lookup got an answer.
 )";
 
 struct Arguments
@@ -100,7 +100,7 @@ po::options_description describe_options(Arguments& arguments)
               config.timeout = std::chrono::milliseconds(not_negative("--timeout-ms", value));
            }),
         "how long one request may take");
-   opts("all", po::bool_switch(&arguments.all), "also print the hosts without HTTP/3, and why");
+   opts("all", po::bool_switch(&arguments.all), "also print the hosts that do not exist");
    opts("color", po::bool_switch(&arguments.color),
         "colour the output even where it does not go to a terminal, e.g. into 'less -R'");
    opts("verbose,v", po::value<std::vector<std::string>>()->zero_tokens()->composing(),
@@ -200,7 +200,7 @@ int main(int argc, char* argv[])
          ++counts[result.outcome];
          if (!result.records.empty() || result.aliased)
             ++with_records;
-         if (all || result.outcome != Outcome::no_http3)
+         if (all || result.outcome != Outcome::not_found)
          {
             std::print("{}", http_probe::format_result(result, color_results));
             std::fflush(stdout); // a run can take a while, and it is worth watching

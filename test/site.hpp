@@ -2,7 +2,7 @@
 // A web site with DNS of its own, all on loopback, for the program to be pointed at: an anyhttp
 // server on one port, for every protocol, and a DNS server with whatever zone the test wants. The
 // server has a certificate for "localhost", the one name that also resolves without our DNS server,
-// which anyhttp's own resolver needs for HTTP/3.
+// which anyhttp's own resolver needs.
 //
 #pragma once
 
@@ -34,6 +34,7 @@ public:
       std::string body;
       std::string content_type = "text/html";
       std::string location;
+      std::chrono::milliseconds delay{}; ///< how long the server takes to get to it
    };
 
    /// One request that arrived.

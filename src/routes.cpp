@@ -15,9 +15,6 @@ namespace
 
 // =================================================================================================
 
-constexpr std::string_view no_tls_over_tcp =
-   "needs TLS over TCP, which anyhttp does not have yet (only HTTP/3 has TLS)";
-
 //
 // What a ServiceMode record says, once its parameters have been read.
 //
@@ -29,6 +26,23 @@ struct Service
    std::optional<std::string> incompatible; // why this record has to be ignored, see section 8
 
    bool offers(std::string_view protocol) const { return std::ranges::contains(alpn, protocol); }
+
+   //
+   // What to connect with, in the order to try them, which is at most one connection per transport.
+   // anyhttp's h2 offers HTTP/1.1 along with it, so that a server still has the choice over TCP.
+   //
+   std::vector<anyhttp::Protocol> protocols() const
+   {
+      using enum anyhttp::Protocol;
+      std::vector<anyhttp::Protocol> result;
+      if (offers("h3"))
+         result.push_back(h3);
+      if (offers("h2"))
+         result.push_back(h2);
+      else if (offers("http/1.1"))
+         result.push_back(h1);
+      return result;
+   }
 };
 
 std::vector<std::string> split_list(std::string_view list)
@@ -108,11 +122,24 @@ std::string to_text(const c_ares_async::https_record& record)
    return text;
 }
 
-std::string Route::to_string() const { return std::format("h3 {}:{}", host, port); }
+std::string Route::to_string() const
+{
+   using enum anyhttp::Protocol;
+   return std::format("{} {}:{}", protocol == h3 ? "h3" : protocol == h2 ? "h2" : "h1", host, port);
+}
 
-Plan plan_routes(std::string_view host, const ServiceRecords& found)
+Plan plan_routes(std::string_view host, const ServiceRecords& found, std::uint16_t default_port)
 {
    Plan plan{.rejected = found.notes};
+
+   if (found.lookup_failed || found.not_found)
+      return plan;
+
+   if (found.unavailable)
+   {
+      plan.out_of_reach = true;
+      return plan;
+   }
 
    auto records = found.records;
    std::ranges::stable_sort(records, {}, &c_ares_async::https_record::priority);
@@ -127,34 +154,59 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found)
          plan.rejected.push_back(std::format("{}: {}", text, *service.incompatible));
          continue;
       }
+
+      const auto protocols = service.protocols();
+      if (protocols.empty())
+      {
+         plan.rejected.push_back(std::format("{}: no protocol that anyhttp speaks", text));
+         continue;
+      }
       any_compatible = true;
 
       const auto target = normalize_host(is_own_name(record.target) ? found.owner : record.target);
-      if (!service.offers("h3"))
-         plan.rejected.push_back(std::format("{}: {}", text, no_tls_over_tcp));
-      else if (target != host)
+      if (target != host)
       {
-         plan.h3_out_of_reach = true;
          plan.rejected.push_back(std::format(
             "{}: target '{}' is not the host, and anyhttp can only verify the name it connects to",
             text, target));
+         continue;
       }
-      else
-         plan.routes.push_back(
-            Route{.host = target, .port = service.port.value_or(443), .source = text});
+
+      for (const auto protocol : protocols)
+      {
+         Route route{.protocol = protocol,
+                     .host = target,
+                     .port = service.port.value_or(default_port),
+                     .source = text};
+         const auto same = [&](const Route& other) {
+            return other.protocol == route.protocol && other.port == route.port;
+         };
+         if (std::ranges::none_of(plan.routes, same)) // a second try would only fail the same way
+            plan.routes.push_back(std::move(route));
+      }
    }
 
-   //
-   // After an alias, the name it led to is an endpoint even without any parameters (section 3),
-   // and that is what is left for a name without any usable record, too. Either way it comes down
-   // to the default ALPN set.
-   //
-   if (found.aliased)
-      plan.rejected.push_back(
-         std::format("alias target '{}' without parameters: {}", found.owner, no_tls_over_tcp));
-   else if (!any_compatible)
-      plan.rejected.push_back(std::format("no usable HTTPS record: {}", no_tls_over_tcp));
+   if (!plan.routes.empty())
+      return plan;
 
+   //
+   // After an alias, the name it led to is an endpoint even without any parameters (section 3).
+   //
+   if (found.aliased && !any_compatible)
+      plan.rejected.push_back(std::format(
+         "alias target '{}' is not the host, and anyhttp can only verify the name it connects to",
+         found.owner));
+
+   if (found.aliased || any_compatible)
+   {
+      plan.out_of_reach = true;
+      return plan;
+   }
+
+   plan.routes.push_back(Route{.protocol = anyhttp::Protocol::h2,
+                               .host = std::string(host),
+                               .port = default_port,
+                               .source = "no usable HTTPS record"});
    return plan;
 }
 

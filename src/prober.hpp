@@ -11,6 +11,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <istream>
 #include <string>
@@ -39,6 +40,9 @@ struct Config
 
    /// The CA certificates to verify servers against, as a PEM file. Empty for the system's.
    std::string tls_ca_file;
+
+   /// Where to go for HTTPS when the records don't say. Only tests have a use for anything else.
+   std::uint16_t default_port = 443;
 };
 
 /// Whether \p host is a name and nothing but a name: no URL, port, path or wildcard, and not an
@@ -57,20 +61,20 @@ struct Result
 {
    enum class Outcome
    {
-      answered, ///< it has HTTP/3, and a response arrived, whatever its status
-      failed, ///< it has HTTP/3, and no response could be had
-      out_of_reach, ///< it has HTTP/3, but on a target that can't be used, see plan_routes()
-      no_http3, ///< its records offer no HTTP/3, or it has none, or the name does not exist
-      lookup_failed, ///< DNS gave no answer, so there is no telling
+      answered, ///< a response arrived, whatever its status
+      failed, ///< it was connected to, and no response could be had
+      out_of_reach, ///< not connected to, its records say so or lead elsewhere, see plan_routes()
+      not_found, ///< not connected to, the name does not exist
+      lookup_failed, ///< not connected to, DNS gave no answer, so there is no telling
    };
 
    std::string host;
-   Outcome outcome = Outcome::no_http3;
+   Outcome outcome = Outcome::failed;
    bool aliased = false; ///< its records are those of another name
    std::vector<c_ares_async::https_record> records; ///< the records that were considered
 
    int status = 0; ///< with \c answered
-   std::string route; ///< with \c answered: what the response came over
+   std::string route; ///< with \c answered: what the response came over, as the server chose it
    std::vector<std::pair<std::string, std::string>> fields; ///< with \c answered
    std::size_t body_size = 0; ///< with \c answered
    std::chrono::milliseconds duration{}; ///< with \c answered: of the attempt that got through
@@ -80,10 +84,11 @@ struct Result
 };
 
 /**
- * Looks up the HTTPS records of each of Config::hosts with the resolver of c-ares-async, and for
- * those that offer HTTP/3, sends one request (see plan_routes()). A response is what comes back,
- * whatever its status: a redirect is reported and not followed, nothing in the body is looked at,
- * and nothing else on the host is requested.
+ * Looks up the HTTPS records of each of Config::hosts with the resolver of c-ares-async, and sends
+ * one request to each host that can be connected to (see plan_routes()). A response is what comes
+ * back, whatever its status: a redirect is reported and not followed, nothing in the body is looked
+ * at, and nothing else on the host is requested. The next route is for a connection that did not
+ * come about: once a request has gone out, that was it for this host, however it ended.
  *
  * Hosts are worked on Config::concurrency at a time, so results arrive as they are ready. All of
  * this is on the one executor, which is also what calls the observer.
@@ -105,12 +110,17 @@ private:
       anyhttp::error_code ec;
       anyhttp::client::Message message;
       std::string error;
+      anyhttp::Protocol protocol = anyhttp::Protocol::h3; ///< what the server chose to speak
+      bool request_sent = false;
+      std::chrono::milliseconds duration{};
    };
 
    anyhttp::Task<void> work();
    anyhttp::Task<ServiceRecords> resolve_service(const std::string& host);
    anyhttp::Task<Result> probe(const std::string& host);
    anyhttp::Task<Response> attempt(const Route& route, const std::string& host);
+   anyhttp::Task<Response> exchange(anyhttp::client::Client& client, anyhttp::Session& session,
+                                    bool& request_sent, boost::urls::url url);
 
    anyhttp::Executor executor_;
    Config config_;

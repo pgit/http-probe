@@ -52,6 +52,9 @@ Site::Site(const anyhttp::Executor& executor) : requests_(std::make_shared<std::
       const auto it = pages_.find(std::string(request.url().encoded_path()));
       const auto page = it != pages_.end() ? it->second : Page{.status = 404};
 
+      if (page.delay.count() > 0)
+         co_await anyhttp::delay(page.delay);
+
       anyhttp::Fields fields;
       fields.set(http::field::content_type, page.content_type);
       if (!page.location.empty())

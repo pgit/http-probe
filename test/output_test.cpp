@@ -48,9 +48,9 @@ TEST(Output, SaysWhyThereIsNoResponse)
                            false),
              "example.com: failed: [h3 example.com:443] timed out\n  note: some note\n");
    EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::out_of_reach}, false),
-             "example.com: HTTP/3 out of reach\n");
-   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::no_http3}, false),
-             "example.com: no HTTP/3\n");
+             "example.com: out of reach\n");
+   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::not_found}, false),
+             "example.com: not found\n");
    EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::lookup_failed}, false),
              "example.com: lookup failed\n");
 }
@@ -96,11 +96,10 @@ TEST(Output, CountsTheOutcomes)
 {
    EXPECT_EQ(format_summary({{Outcome::answered, 3},
                              {Outcome::failed, 1},
-                             {Outcome::no_http3, 900},
+                             {Outcome::not_found, 900},
                              {Outcome::lookup_failed, 17}},
                             false),
-             "3 answered, 1 failed, 0 with HTTP/3 out of reach, 900 without HTTP/3, "
-             "17 lookups failed");
+             "3 answered, 1 failed, 0 out of reach, 900 not found, 17 lookups failed");
 }
 
 TEST(Output, DrawsAttentionOnlyToWhatHappened)

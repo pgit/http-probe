@@ -7,6 +7,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ip/udp.hpp>
 
 #include <spdlog/sinks/ostream_sink.h>
@@ -37,14 +38,30 @@ using testing::Pair;
 namespace
 {
 
-std::vector<fake_dns_server::svc_param> h3_at(std::uint16_t port)
+fake_dns_server::svc_param port_param(std::uint16_t port)
 {
-   return {{ARES_SVCB_PARAM_ALPN, {2, 'h', '3'}},
-           {ARES_SVCB_PARAM_PORT,
-            {static_cast<unsigned char>(port >> 8), static_cast<unsigned char>(port & 0xff)}}};
+   return {ARES_SVCB_PARAM_PORT,
+           {static_cast<unsigned char>(port >> 8), static_cast<unsigned char>(port & 0xff)}};
 }
 
+const fake_dns_server::svc_param alpn_h3{ARES_SVCB_PARAM_ALPN, {2, 'h', '3'}};
 const fake_dns_server::svc_param alpn_h2{ARES_SVCB_PARAM_ALPN, {2, 'h', '2'}};
+const fake_dns_server::svc_param alpn_h1{ARES_SVCB_PARAM_ALPN,
+                                         {8, 'h', 't', 't', 'p', '/', '1', '.', '1'}};
+const fake_dns_server::svc_param no_default_alpn{ARES_SVCB_PARAM_NO_DEFAULT_ALPN, {}};
+
+//
+// One protocol and no other, for a test to know which one it is getting. A record with nothing but
+// an "alpn" also has the default set, and that means trying HTTP/1.1 as well.
+//
+std::vector<fake_dns_server::svc_param> only(fake_dns_server::svc_param alpn, std::uint16_t port)
+{
+   return {std::move(alpn), no_default_alpn, port_param(port)};
+}
+
+std::vector<fake_dns_server::svc_param> h3_at(std::uint16_t port) { return only(alpn_h3, port); }
+std::vector<fake_dns_server::svc_param> h2_at(std::uint16_t port) { return only(alpn_h2, port); }
+std::vector<fake_dns_server::svc_param> h1_at(std::uint16_t port) { return only(alpn_h1, port); }
 
 class Probe : public testing::Test
 {
@@ -54,7 +71,8 @@ protected:
       return {.hosts = std::move(hosts),
               .timeout = 1000ms,
               .dns_server = site.dns_address(),
-              .tls_ca_file = site.ca_file().string()};
+              .tls_ca_file = site.ca_file().string(),
+              .default_port = site.port()};
    }
 
    void probe(Config config)
@@ -253,7 +271,7 @@ TEST_F(Probe, GoesOnAfterAHostThatFails)
 
    ASSERT_EQ(results.size(), 2u);
    EXPECT_EQ(results[0].host, "nowhere.example.test");
-   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::not_found);
    EXPECT_EQ(results[1].host, "localhost");
    EXPECT_EQ(results[1].status, 200);
 }
@@ -262,28 +280,23 @@ TEST_F(Probe, GoesOnAfterAHostThatFails)
 // A list of hosts
 // =================================================================================================
 
-TEST_F(Probe, ConnectsToTheHostsWithHttp3AndToNoOthers)
+TEST_F(Probe, DoesNotConnectToANameThatDoesNotExist)
 {
    //
-   // The other names exist, with records or without, and their addresses are the server's. It takes
-   // no more than connecting to any of them to show up in its requests.
+   // Which would also take the lookup of its address to the resolver of the system, and away from
+   // loopback, for every test that has a name like this.
    //
-   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
-   site.dns().add_address("h2.example.test", "127.0.0.1");
-   site.dns().add_https("h2.example.test", 1, ".", {alpn_h2});
-   site.dns().add_address("plain.example.test", "127.0.0.1");
+   site.dns().add_address("localhost", "127.0.0.1");
    site.page("/", {.body = "hello"});
 
-   auto configuration = config({"h2.example.test", "plain.example.test", "localhost"});
+   auto configuration = config({"nowhere.example.test", "localhost"});
    configuration.concurrency = 1;
    probe(std::move(configuration));
 
-   ASSERT_EQ(results.size(), 3u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
-   EXPECT_EQ(results[1].outcome, Result::Outcome::no_http3);
-   EXPECT_EQ(results[2].outcome, Result::Outcome::answered) << notes(results[2]);
+   ASSERT_EQ(results.size(), 2u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::not_found);
+   EXPECT_EQ(results[1].outcome, Result::Outcome::answered) << notes(results[1]);
    EXPECT_THAT(site.targets(), ElementsAre("/"));
-   EXPECT_EQ(site.requests()[0].authority, "localhost");
 }
 
 TEST_F(Probe, ReportsEachHostOnceHoweverManyThereAre)
@@ -343,18 +356,90 @@ TEST_F(Probe, WorksOnOneHostAtATimeIfToldTo)
 // How the HTTPS records decide about the connection
 // =================================================================================================
 
-TEST_F(Probe, SkipsARecordItCanNotUse)
+TEST_F(Probe, SpeaksHttp2OverTlsWhereTheRecordSaysSo)
 {
-   site.dns().add_https("localhost", 1, ".", {alpn_h2});
-   site.dns().add_https("localhost", 2, ".", h3_at(site.port()));
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
    site.page("/", {.body = "hello"});
 
    probe(config());
 
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].status, 200) << notes(results[0]);
-   EXPECT_THAT(notes(results[0]), HasSubstr("alpn=h2"));
-   EXPECT_THAT(notes(results[0]), HasSubstr("TLS over TCP"));
+   EXPECT_EQ(results[0].route, std::format("h2 localhost:{}", site.port()));
+   EXPECT_EQ(results[0].body_size, 5u);
+   ASSERT_EQ(site.requests().size(), 1u);
+   EXPECT_EQ(site.requests()[0].authority, "localhost");
+   EXPECT_THAT(site.requests()[0].user_agent, HasSubstr("http-probe/"));
+}
+
+TEST_F(Probe, SpeaksHttp1OverTlsWhereTheRecordSaysSo)
+{
+   site.dns().add_https("localhost", 1, ".", h1_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h1 localhost:{}", site.port()));
+   EXPECT_EQ(results[0].body_size, 5u);
+   ASSERT_EQ(site.requests().size(), 1u);
+   EXPECT_THAT(site.requests()[0].authority, HasSubstr("localhost"));
+}
+
+TEST_F(Probe, PrefersHttp3OfWhatARecordOffers)
+{
+   site.dns().add_https("localhost", 1, ".", {alpn_h3, port_param(site.port())});
+   site.page("/", {.body = "hello"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].route, std::format("h3 localhost:{}", site.port())) << notes(results[0]);
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, GoesOverTcpToTheDefaultPortWithoutARecord)
+{
+   site.dns().add_address("localhost", "127.0.0.1");
+   site.page("/", {.body = "hello"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h2 localhost:{}", site.port()));
+   EXPECT_THAT(results[0].records, IsEmpty());
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, DoesNotFollowARedirectOverHttp2)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.status = 302, .location = "/moved"});
+   site.page("/moved", {.body = "not asked for"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 302) << notes(results[0]);
+   EXPECT_THAT(results[0].fields, Contains(Pair("location", "/moved")));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, DoesNotFollowARedirectOverHttp1)
+{
+   site.dns().add_https("localhost", 1, ".", h1_at(site.port()));
+   site.page("/", {.status = 302, .location = "/moved"});
+   site.page("/moved", {.body = "not asked for"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 302) << notes(results[0]);
+   // As it came, and only HTTP/2 and HTTP/3 have field names in lower case on the wire.
+   EXPECT_THAT(results[0].fields, Contains(Pair("Location", "/moved")));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
 
 TEST_F(Probe, FallsBackToTheNextRecordWhenAConnectionFails)
@@ -380,16 +465,59 @@ TEST_F(Probe, FallsBackToTheNextRecordWhenAConnectionFails)
    EXPECT_THAT(notes(results[0]), HasSubstr("timed out"));
 }
 
-TEST_F(Probe, FailsWithoutARecord)
+TEST_F(Probe, FallsBackFromHttp3ToTcpWhenAConnectionFails)
 {
+   boost::asio::ip::udp::socket silent(context, {boost::asio::ip::udp::v6(), 0});
+   abandon_quic_sessions = true;
+
+   site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
+   site.dns().add_https("localhost", 2, ".", h2_at(site.port()));
    site.page("/", {.body = "hello"});
 
-   probe(config());
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
-   EXPECT_THAT(notes(results[0]), HasSubstr("TLS over TCP"));
-   EXPECT_THAT(site.requests(), IsEmpty());
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h2 localhost:{}", site.port()));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, TriesNoOtherRouteOnceARequestHasGoneOut)
+{
+   //
+   // The server has it, it is just not done with it. Everything after this would be a second
+   // request to the same host: over HTTP/1.1 on the same record, and over HTTP/2 on the next.
+   //
+   site.dns().add_https("localhost", 1, ".", {alpn_h3, port_param(site.port())});
+   site.dns().add_https("localhost", 2, ".", h2_at(site.port()));
+   site.page("/", {.body = "too late", .delay = 400ms});
+
+   auto configuration = config();
+   configuration.timeout = 100ms;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(results[0].error, HasSubstr("timed out"));
+   EXPECT_THAT(results[0].error, HasSubstr("h3"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, TriesNoOtherRouteOnceARequestHasGoneOutOverTcp)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.dns().add_https("localhost", 2, ".", h1_at(site.port()));
+   site.page("/", {.body = "too late", .delay = 400ms});
+
+   auto configuration = config();
+   configuration.timeout = 100ms;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
 
 TEST_F(Probe, DoesNotConnectToATargetOtherThanTheHost)
@@ -425,6 +553,23 @@ TEST_F(Probe, RefusesACertificateItDoesNotTrust)
    EXPECT_THAT(site.requests(), IsEmpty()) << "no request survives the handshake";
 }
 
+TEST_F(Probe, RefusesACertificateItDoesNotTrustOverTcp)
+{
+   Site other(context.get_executor());
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.tls_ca_file = other.ca_file().string();
+   other.stop();
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(results[0].error, HasSubstr("connect"));
+   EXPECT_THAT(site.requests(), IsEmpty()) << "no request survives the handshake";
+}
+
 TEST_F(Probe, FollowsAnAliasToItsRecords)
 {
    //
@@ -446,12 +591,17 @@ TEST_F(Probe, RecognizesAnAliasLoop)
 {
    site.dns().add_https("localhost", 0, "alias.example.test");
    site.dns().add_https("alias.example.test", 0, "localhost");
+   site.page("/", {.body = "hello"});
 
    probe(config());
 
+   //
+   // As if it had no record at all (section 3.1), which leaves the default port.
+   //
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
    EXPECT_THAT(notes(results[0]), HasSubstr("too long or has a loop"));
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h2 localhost:{}", site.port()));
 }
 
 TEST_F(Probe, IgnoresServiceRecordsNextToAnAlias)
@@ -463,9 +613,22 @@ TEST_F(Probe, IgnoresServiceRecordsNextToAnAlias)
    probe(config());
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3)
+   EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach)
       << "the alias has no records of its own";
    EXPECT_TRUE(results[0].aliased);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, TakesAHostsWordForItThatTheServiceIsNotAvailable)
+{
+   site.dns().add_https("localhost", 0, ".");
+   site.page("/", {.body = "hello"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach);
+   EXPECT_THAT(notes(results[0]), HasSubstr("not available"));
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 
@@ -518,12 +681,45 @@ TEST_F(Probe, GivesUpOnAServerThatDoesNotAnswer)
    EXPECT_THAT(results[0].error, HasSubstr("timed out"));
 }
 
+TEST_F(Probe, GivesUpOnATcpServerThatDoesNotAnswer)
+{
+   //
+   // It takes connections, as the kernel does that for it, and leaves the handshake hanging.
+   //
+   boost::asio::ip::tcp::acceptor silent(context, {boost::asio::ip::tcp::v6(), 0});
+   site.dns().add_https("localhost", 1, ".", h2_at(silent.local_endpoint().port()));
+
+   auto configuration = config();
+   configuration.timeout = 100ms;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(results[0].error, HasSubstr("timed out"));
+}
+
+TEST_F(Probe, ReportsAPortThatIsClosed)
+{
+   std::uint16_t closed = 0;
+   {
+      boost::asio::ip::tcp::acceptor acceptor(context, {boost::asio::ip::tcp::v6(), 0});
+      closed = acceptor.local_endpoint().port();
+   }
+   site.dns().add_https("localhost", 1, ".", h2_at(closed));
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(results[0].error, HasSubstr("connect"));
+}
+
 TEST_F(Probe, ReportsANameThatDoesNotExist)
 {
    probe(config({"nowhere.example.test"}));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::no_http3);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::not_found);
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 

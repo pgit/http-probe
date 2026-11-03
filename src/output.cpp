@@ -82,10 +82,10 @@ std::string format_result(const Result& result, bool color)
          std::format("{}: {}: {}\n", host, colored("failed", color_of::bad, color), result.error);
       break;
    case Outcome::out_of_reach:
-      text = std::format("{}: {}\n", host, colored("HTTP/3 out of reach", color_of::moved, color));
+      text = std::format("{}: {}\n", host, colored("out of reach", color_of::moved, color));
       break;
-   case Outcome::no_http3:
-      text = std::format("{}: no HTTP/3\n", host);
+   case Outcome::not_found:
+      text = std::format("{}: not found\n", host);
       break;
    case Outcome::lookup_failed:
       text = std::format("{}: {}\n", host, colored("lookup failed", color_of::bad, color));
@@ -110,10 +110,10 @@ std::string format_summary(Counts counts, bool color)
       return counts[outcome] ? colored(line, code, color) : line;
    };
    return std::format(
-      "{}, {}, {}, {} without HTTP/3, {}", count(Outcome::answered, "answered", color_of::good),
+      "{}, {}, {}, {} not found, {}", count(Outcome::answered, "answered", color_of::good),
       count(Outcome::failed, "failed", color_of::bad),
-      count(Outcome::out_of_reach, "with HTTP/3 out of reach", color_of::moved),
-      counts[Outcome::no_http3], count(Outcome::lookup_failed, "lookups failed", color_of::bad));
+      count(Outcome::out_of_reach, "out of reach", color_of::moved), counts[Outcome::not_found],
+      count(Outcome::lookup_failed, "lookups failed", color_of::bad));
 }
 
 // =================================================================================================

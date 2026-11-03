@@ -169,8 +169,9 @@ anyhttp::Task<ServiceRecords> Prober::resolve_service(const std::string& host)
       auto [ec, records] = co_await resolver_.resolve_https(found.owner);
       if (ec)
       {
-         if (ec != c_ares_async::make_ares_error(ARES_ENODATA) &&
-             ec != c_ares_async::make_ares_error(ARES_ENOTFOUND))
+         if (ec == c_ares_async::make_ares_error(ARES_ENOTFOUND))
+            found.not_found = !found.aliased; // the target of an alias is another matter
+         else if (ec != c_ares_async::make_ares_error(ARES_ENODATA))
          {
             found.lookup_failed = true;
             found.notes.push_back(
@@ -192,11 +193,11 @@ anyhttp::Task<ServiceRecords> Prober::resolve_service(const std::string& host)
       if (alias->target.empty() || alias->target == ".")
       {
          //
-         // "The service is not available" (section 2.5.1), which is advisory. Treated like no
-         // record at all, what comes of that is the connection attempt's to find out.
+         // "The service is not available" (section 2.5.1). This is advisory, but one who does not
+         // have to request anything can as well take the host's word for it.
          //
          found.notes.push_back(std::format("'{}' says the service is not available", found.owner));
-         found.aliased = false;
+         found.unavailable = true;
          co_return found;
       }
 
@@ -221,16 +222,16 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
    result.aliased = found.aliased;
    result.records = found.records;
 
-   const auto plan = plan_routes(host, found);
+   const auto plan = plan_routes(host, found, config_.default_port);
    result.notes = plan.rejected;
    for (const auto& rejected : plan.rejected)
       spdlog::debug("{}: rejected: {}", host, rejected);
 
    if (plan.routes.empty())
    {
-      result.outcome = plan.h3_out_of_reach  ? Result::Outcome::out_of_reach
-                       : found.lookup_failed ? Result::Outcome::lookup_failed
-                                             : Result::Outcome::no_http3;
+      result.outcome = found.lookup_failed ? Result::Outcome::lookup_failed
+                       : found.not_found   ? Result::Outcome::not_found
+                                           : Result::Outcome::out_of_reach;
       co_return result;
    }
 
@@ -238,82 +239,114 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
    for (const auto& route : plan.routes)
    {
       spdlog::debug("{}: connecting by {}, for {}", host, route.to_string(), route.source);
-      const auto start = std::chrono::steady_clock::now();
       auto response = co_await attempt(route, host);
       if (response.ec)
       {
          result.error = std::format("[{}] {}", route.to_string(), response.error);
          result.notes.push_back(result.error);
          spdlog::debug("{}: {}", host, result.error);
+         if (response.request_sent)
+            break; // the host may have seen it, and another route would make it two
          continue;
       }
 
       result.outcome = Result::Outcome::answered;
       result.error.clear();
       result.status = static_cast<int>(response.message.result_int());
-      result.route = route.to_string();
+      auto spoken = route;
+      spoken.protocol = response.protocol;
+      result.route = spoken.to_string();
       for (const auto& field : response.message)
          result.fields.emplace_back(field.name_string(), field.value());
       result.body_size = response.message.body().size();
-      result.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-         std::chrono::steady_clock::now() - start);
+      result.duration = response.duration;
       break;
    }
    co_return result;
 }
 
 //
-// Connects as the route says and asks for the host's root. Everything is reported rather than
-// thrown: when_either() would otherwise sit out the timeout, as what throws does not count as
-// having finished first.
+// Connects as the route says and asks for the host's root, within the timeout, and after that ends
+// the connection in an orderly way, which has limits of its own and is none of the timeout's
+// business: the response is there by then.
 //
 anyhttp::Task<Prober::Response> Prober::attempt(const Route& route, const std::string& host)
 {
    anyhttp::client::Config client_config;
-   client_config.protocol = anyhttp::Protocol::h3;
+   client_config.protocol = route.protocol;
    client_config.tls_ca_file = config_.tls_ca_file;
 
    //
    // The name of the route, as that is also what anyhttp verifies the certificate against, which
-   // leaves it to its own resolver to look up the address.
+   // leaves it to its own resolver to look up the address. The scheme is what makes it TLS over
+   // TCP, too.
    //
    client_config.url.set_scheme("https");
    client_config.url.set_host_address(route.host);
    client_config.url.set_port_number(route.port);
 
-   const auto run = [](anyhttp::Executor executor, anyhttp::client::Config client_config,
-                       boost::urls::url url) -> anyhttp::Task<Response> {
-      try
-      {
-         anyhttp::client::Client client(executor, std::move(client_config));
-         auto [connect_ec, session] = co_await client.connect();
-         if (connect_ec)
-            co_return Response{.ec = connect_ec,
-                               .error = std::format("connect: {}", connect_ec.message())};
+   const auto start = std::chrono::steady_clock::now();
+   anyhttp::client::Client client(executor_, std::move(client_config));
+   anyhttp::Session session;
+   bool request_sent = false;
 
-         anyhttp::Fields headers;
-         headers.set(http::field::user_agent, user_agent);
-         auto [get_ec, message] = co_await session.get(std::move(url), std::move(headers));
-         co_return Response{.ec = get_ec,
-                            .message = std::move(message),
-                            .error = get_ec ? std::format("request: {}", get_ec.message()) : ""};
-      }
-      catch (const std::exception& ex)
-      {
-         co_return Response{.ec = make_error_code(boost::system::errc::connection_aborted),
-                            .error = ex.what()};
-      }
-   };
-
+   //
+   // These stay around for as long as exchange() needs them: when_either() waits for what it has
+   // cancelled to finish.
+   //
    auto result = co_await anyhttp::when_either(
-      run(executor_, std::move(client_config), boost::urls::url(std::format("https://{}/", host))),
+      exchange(client, session, request_sent, boost::urls::url(std::format("https://{}/", host))),
       anyhttp::delay(config_.timeout));
 
-   if (auto* response = std::get_if<0>(&result))
-      co_return std::move(*response);
+   auto* exchanged = std::get_if<0>(&result);
+   if (!exchanged)
+      co_return Response{.ec = make_error_code(boost::system::errc::timed_out),
+                         .error = std::format("timed out after {}", config_.timeout),
+                         .request_sent = request_sent};
 
-   co_return Response{.ec = make_error_code(boost::system::errc::timed_out),
-                      .error = std::format("timed out after {}", config_.timeout)};
+   auto response = std::move(*exchanged);
+   response.request_sent = request_sent;
+   response.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+
+   if (!response.ec)
+      if (auto [ec] = co_await session.shutdown(); ec)
+         spdlog::debug("{}: shutdown: {}", host, ec.message());
+
+   co_return response;
+}
+
+//
+// Everything is reported rather than thrown: when_either() would otherwise sit out the timeout, as
+// what throws does not count as having finished first.
+//
+anyhttp::Task<Prober::Response> Prober::exchange(anyhttp::client::Client& client,
+                                                 anyhttp::Session& session, bool& request_sent,
+                                                 boost::urls::url url)
+{
+   try
+   {
+      auto [connect_ec, connected] = co_await client.connect();
+      if (connect_ec)
+         co_return Response{.ec = connect_ec,
+                            .error = std::format("connect: {}", connect_ec.message())};
+
+      session = std::move(connected);
+
+      anyhttp::Fields headers;
+      headers.set(http::field::user_agent, user_agent);
+      request_sent = true;
+      auto [get_ec, message] = co_await session.get(std::move(url), std::move(headers));
+      co_return Response{.ec = get_ec,
+                         .message = std::move(message),
+                         .error = get_ec ? std::format("request: {}", get_ec.message()) : "",
+                         .protocol = session.protocol()};
+   }
+   catch (const std::exception& ex)
+   {
+      co_return Response{.ec = make_error_code(boost::system::errc::connection_aborted),
+                         .error = ex.what()};
+   }
 }
 
 // =================================================================================================

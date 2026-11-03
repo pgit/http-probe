@@ -16,29 +16,36 @@ http-probe --dns-server 1.1.1.1 --file hostnames.txt
 ```
 
 It looks up the HTTPS records of each host in DNS ([RFC 9460](https://www.rfc-editor.org/rfc/rfc9460)),
-and connects to those that offer HTTP/3. From each of them it requests `https://<host>/` once, and
-prints the status, the route, the time it took and the header fields of the response, along with the
-host's records. A redirect is reported and not followed, and nothing else on the host is requested.
+and requests `https://<host>/` once, over TLS, in the way that the records say. It prints the status,
+the route, the time it took and the header fields of the response, along with the host's records. A
+redirect is reported and not followed, and nothing else on the host is requested.
 
-HTTP/3 is what it takes because anyhttp's client has TLS on HTTP/3 only, so far. There is output for
-every host that offers it and every lookup that failed, and `--all` adds the others.
-The counts at the end look like this, on stderr:
+There is output for every host but those that do not exist, which `--all` adds. The counts at the end
+look like this, on stderr:
 
 ```
-12 answered, 1 failed, 0 with HTTP/3 out of reach, 180 without HTTP/3, 2 lookups failed
+190 answered, 1 failed, 3 out of reach, 12 not found, 2 lookups failed
 ```
 
 | The host                                      | Outcome                                     |
 |-----------------------------------------------|---------------------------------------------|
-| has a record with `h3` in its ALPN set        | answered or failed, to the port of the record |
-| has that only on a target that is not itself  | out of reach: anyhttp can't connect to one name and verify another |
-| has records without `h3`, or none at all      | without HTTP/3, not connected to            |
-| does not exist                                | without HTTP/3, not connected to            |
-| gets no answer from DNS                       | lookup failed, so there is no telling       |
+| has a record on its own name                  | answered or failed, by the protocols and the port of the record |
+| has no record, or none that is compatible     | answered or failed, over TCP on port 443, HTTP/2 or HTTP/1.1 as the server likes |
+| has records for other targets only, or an alias to another name | out of reach, not connected to: anyhttp can't connect to one name and verify another |
+| has a record that says the service is not available | out of reach, not connected to        |
+| does not exist                                | not found, not connected to                 |
+| gets no answer from DNS                       | lookup failed, so there is no telling, not connected to |
 
-Aliases are followed, a record has to be compatible, and the lowest priority goes first. Over HTTP/3,
-the address comes from anyhttp's own resolver and not from c-ares, so `--dns-server` and the address
-hints in the record do not apply to it.
+Aliases are followed, a record has to be compatible, and the lowest priority goes first. Within a
+record, HTTP/3 goes first, and then TCP on the same port: HTTP/2 if the record has `h2`, otherwise
+HTTP/1.1, which is in every record that does not say `no-default-alpn`. The route in the output is
+what the server went for, which may be HTTP/1.1 where HTTP/2 was offered.
+
+**One request means one.** The next route is for when connecting failed. Once a request has gone out,
+the host has been asked, so that a timeout or a response cut short ends it there, as a failure.
+
+The address comes from anyhttp's own resolver and not from c-ares, so `--dns-server` and the address
+hints in the record do not apply to it. Certificates are always verified, against the host's name.
 
 **To see what is going on,** `-v` logs to stderr: the requests and responses from anyhttp, the queries
 from c-ares and the steps in between. `-vv` adds all of QUIC. Hosts run at the same time mix in the
@@ -48,8 +55,11 @@ anyhttp puts them into some of its log messages regardless.
 **Use `--dns-server`.** The resolver in the devcontainer answers with no data for HTTPS records, even
 where they exist, which looks just like no host having any.
 
-**The program can take a while to end.** If a host with HTTP/3 did not answer, anyhttp goes on sending
+**The program can take a while to end.** If a host did not answer over HTTP/3, anyhttp goes on sending
 to it for 30 seconds after the timeout. The counts are printed when the work is done, ahead of that.
+
+**A response goes to memory as a whole,** as anyhttp has no way of getting at it piece by piece with a
+GET yet. So only `--timeout-ms` limits how large one can get.
 
 To see it work without going anywhere, `demo_site` runs a site and a DNS server on loopback, and
 prints the command to request it with:
