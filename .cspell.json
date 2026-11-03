@@ -8,7 +8,8 @@
         "corosio",
         "Eisenlohr",
         "psedoc",
-        "spdlog"
+        "spdlog",
+        "SVCB"
     ],
     "ignorePaths": [
         ".devcontainer/*",
