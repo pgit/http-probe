@@ -19,7 +19,6 @@
 #include <set>
 #include <stdexcept>
 #include <tuple>
-#include <variant>
 
 namespace http = boost::beast::http;
 
@@ -102,7 +101,7 @@ void prefer_ipv6(std::vector<corosio::endpoint>& addresses)
 
 Prober::Prober(capy::any_executor executor, Config config, Observer observer)
    : executor_(executor), config_(std::move(config)), observer_(std::move(observer)),
-     resolver_(std::move(executor))
+     resolver_(executor)
 {
    if (config_.hosts.empty())
       throw std::invalid_argument("nothing to do: no host names given");
