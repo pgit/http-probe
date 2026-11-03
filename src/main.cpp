@@ -11,6 +11,7 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include <fstream>
 #include <iostream>
 #include <print>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -32,18 +34,18 @@ namespace po = boost::program_options;
 namespace
 {
 
-constexpr std::string_view about = R"(usage: http-probe [options] HOST...
+constexpr std::string_view usage = R"(usage: http-probe [options] HOST...
        http-probe [options] --file LIST
-
-Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once, the way they
-say or over TCP on port 443 if they don't, printing the status and header fields of the response.
-Redirects are reported and not followed, and nothing else on the host is requested.
 )";
 
-constexpr std::string_view exit_code = R"(
-The exit code is 0 if every host that was connected to answered, whatever the status, and every
-lookup got an answer.
-)";
+constexpr std::string_view about =
+   "Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once, the way "
+   "they say or over TCP on port 443 if they don't, printing the status and header fields of the "
+   "response. Redirects are reported and not followed, and nothing else on the host is requested.";
+
+constexpr std::string_view exit_code =
+   "The exit code is 0 if every host that was connected to answered, whatever the status, and "
+   "every lookup got an answer.";
 
 struct Arguments
 {
@@ -67,13 +69,55 @@ int not_negative(std::string_view option, int value)
 }
 
 //
+// How wide to print the help. Either stream will do, as they are on the same terminal, and with
+// 'http-probe --help | less' only stderr still is one.
+//
+unsigned help_columns()
+{
+   for (const int fd : {STDOUT_FILENO, STDERR_FILENO})
+   {
+      winsize ws{};
+      if (::ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col >= 40)
+         return ws.ws_col;
+   }
+   return po::options_description::m_default_line_length;
+}
+
+//
+// A paragraph broken at its spaces into lines that fit.
+//
+std::string wrap(std::string_view paragraph, unsigned columns)
+{
+   std::string wrapped;
+   std::size_t line = 0;
+   for (const auto range : paragraph | std::views::split(' '))
+   {
+      const std::string_view word{range};
+      if (line > 0 && line + 1 + word.size() > columns)
+      {
+         wrapped += '\n';
+         line = 0;
+      }
+      else if (line > 0)
+      {
+         wrapped += ' ';
+         ++line;
+      }
+      wrapped += word;
+      line += word.size();
+   }
+   return wrapped;
+}
+
+//
 // The options, stored into 'arguments', which has to outlive parsing them.
 //
 po::options_description describe_options(Arguments& arguments)
 {
    auto& config = arguments.config;
 
-   po::options_description desc("Options", 100, 50);
+   const auto columns = help_columns();
+   po::options_description desc("Options", columns, columns / 2);
    auto opts = desc.add_options();
    opts("help,h", po::bool_switch(&arguments.help), "produce this help message");
    opts("host", po::value(&config.hosts)->value_name("HOST"),
@@ -115,7 +159,11 @@ po::options_description describe_options(Arguments& arguments)
 
 void print_usage(std::ostream& out, const po::options_description& options)
 {
-   out << about << '\n' << options << exit_code;
+   const auto columns = help_columns();
+   out << usage << '\n'
+       << wrap(about, columns) << "\n\n"
+       << options << '\n'
+       << wrap(exit_code, columns) << '\n';
 }
 
 void parse_arguments(int argc, char* argv[], const po::options_description& options,
