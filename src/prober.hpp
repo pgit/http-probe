@@ -52,6 +52,10 @@ struct Config
 
    /// Where to go for HTTPS when the records don't say. Only tests have a use for anything else.
    std::uint16_t default_port = 443;
+
+   /// Connect only to the hosts with a record that offers HTTP/3, see has_h3_record(). Those are
+   /// treated as usual, which includes going over TCP if HTTP/3 can not be connected to.
+   bool h3_only = false;
 };
 
 /// Whether \p host is a name and nothing but a name: no URL, port, path or wildcard, and not an
@@ -78,6 +82,7 @@ struct Result
       out_of_reach, ///< not connected to, its records say so or lead elsewhere, see plan_routes()
       not_found, ///< not connected to, the name does not exist
       lookup_failed, ///< not connected to, DNS gave no answer, so there is no telling
+      no_h3, ///< not connected to, it has no record that offers HTTP/3, see Config::h3_only
    };
 
    std::string host;

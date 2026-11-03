@@ -72,6 +72,9 @@ struct Plan
 Plan plan_routes(std::string_view host, const ServiceRecords& found,
                  std::uint16_t default_port = 443);
 
+/// Whether a record that has to be taken seriously (section 8) offers HTTP/3, wherever it points.
+bool has_h3_record(const ServiceRecords& found);
+
 // =================================================================================================
 
 } // namespace http_probe

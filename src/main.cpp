@@ -100,7 +100,10 @@ po::options_description describe_options(Arguments& arguments)
               config.timeout = std::chrono::milliseconds(not_negative("--timeout-ms", value));
            }),
         "how long one request may take");
-   opts("all", po::bool_switch(&arguments.all), "also print the hosts that do not exist");
+   opts("h3", po::bool_switch(&config.h3_only),
+        "connect only to the hosts with an HTTPS record that offers HTTP/3");
+   opts("all", po::bool_switch(&arguments.all),
+        "also print the hosts that do not exist, and those that --h3 leaves out");
    opts("color", po::bool_switch(&arguments.color),
         "colour the output even where it does not go to a terminal, e.g. into 'less -R'");
    opts("verbose,v", po::value<std::vector<std::string>>()->zero_tokens()->composing(),
@@ -200,7 +203,7 @@ int main(int argc, char* argv[])
          ++counts[result.outcome];
          if (!result.records.empty() || result.aliased)
             ++with_records;
-         if (all || result.outcome != Outcome::not_found)
+         if (all || (result.outcome != Outcome::not_found && result.outcome != Outcome::no_h3))
          {
             std::print("{}", http_probe::format_result(result, color_results));
             std::fflush(stdout); // a run can take a while, and it is worth watching

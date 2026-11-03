@@ -75,6 +75,19 @@ TEST(Output, SaysWhyThereIsNoResponse)
              "example.com: lookup failed\n");
 }
 
+TEST(Output, SaysThatAHostWasLeftOut)
+{
+   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::no_h3}, false),
+             "example.com: no h3 record\n");
+}
+
+TEST(Output, CountsTheHostsLeftOutOnlyIfThereAreAny)
+{
+   EXPECT_EQ(format_summary({{Outcome::answered, 3}, {Outcome::no_h3, 5}}, false),
+             "3 answered, 0 failed, 0 out of reach, 0 not found, 0 lookups failed, 5 without h3");
+   EXPECT_THAT(format_summary({{Outcome::answered, 3}}, false), Not(HasSubstr("h3")));
+}
+
 TEST(Output, ColoursTheWayCAresAsyncDoes)
 {
    const auto text = format_result(answered(), true);

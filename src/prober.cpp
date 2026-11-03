@@ -224,6 +224,13 @@ capy::task<Result> Prober::probe(const std::string& host)
    for (const auto& rejected : plan.rejected)
       spdlog::debug("{}: rejected: {}", host, rejected);
 
+   if (config_.h3_only && !found.lookup_failed && !found.not_found && !has_h3_record(found))
+   {
+      spdlog::debug("{}: left out, no record offers HTTP/3", host);
+      result.outcome = Result::Outcome::no_h3;
+      co_return result;
+   }
+
    if (plan.routes.empty())
    {
       result.outcome = found.lookup_failed ? Result::Outcome::lookup_failed

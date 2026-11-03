@@ -898,3 +898,107 @@ TEST_F(Probe, ReportsAFailedLookup)
    EXPECT_THAT(notes(results[0]), HasSubstr("HTTPS lookup"));
    EXPECT_THAT(site.requests(), IsEmpty());
 }
+
+// =================================================================================================
+// --h3
+// =================================================================================================
+
+TEST_F(Probe, H3OnlyRequestsAHostWithARecordThatOffersIt)
+{
+   site.dns().add_https("localhost", 1, ".", {alpn_h3, port_param(site.port())});
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.h3_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h3 localhost:{}", site.port()));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, H3OnlyLeavesOutAHostWithoutARecord)
+{
+   site.dns().add_address("localhost", "127.0.0.1");
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.h3_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::no_h3);
+   EXPECT_THAT(results[0].address, IsEmpty());
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, H3OnlyLeavesOutAHostWhoseRecordsDoNotOfferIt)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.h3_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::no_h3);
+   EXPECT_EQ(results[0].records.size(), 1u) << "for --all to say why";
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, H3OnlyStillFallsBackToTcpWhenAConnectionFails)
+{
+   auto silent = silent_udp_socket();
+
+   site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
+   site.dns().add_https("localhost", 2, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   configuration.h3_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h2 localhost:{}", site.port()));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, H3OnlyStillSaysThatARecordLeadsElsewhere)
+{
+   site.dns().add_https("localhost", 1, "elsewhere.example.test", h3_at(site.port()));
+
+   auto configuration = config();
+   configuration.h3_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, H3OnlyStillSaysThatANameDoesNotExist)
+{
+   auto configuration = config({"nowhere.example.test"});
+   configuration.h3_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::not_found);
+}
+
+TEST_F(Probe, H3OnlyDoesNotTakeAFailedLookupForNoHttp3)
+{
+   site.dns().set_rcode(ARES_RCODE_SERVFAIL);
+
+   auto configuration = config();
+   configuration.h3_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}

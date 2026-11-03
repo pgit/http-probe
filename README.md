@@ -36,11 +36,17 @@ look like this, on stderr:
 | has a record that says the service is not available | out of reach, not connected to        |
 | does not exist                                | not found, not connected to                 |
 | gets no answer from DNS, or has no address    | lookup failed, so there is no telling, not connected to |
+| has no record that offers `h3`, with `--h3`   | without h3, not connected to                |
 
 Aliases are followed, a record has to be compatible, and the lowest priority goes first. Within a
 record, HTTP/3 goes first, and then TCP on the same port: HTTP/2 if the record has `h2`, otherwise
 HTTP/1.1, which is in every record that does not say `no-default-alpn`. The route in the output is
 what the server went for, which may be HTTP/1.1 where HTTP/2 was offered.
+
+**With `--h3`,** only hosts with a compatible record that has `h3` in its `alpn` go ahead, on whichever
+target, and they are treated as above, so that one can still end up out of reach, or going over TCP
+when HTTP/3 can not be connected to. The others are left out after their HTTPS lookup, and printed
+only with `--all`. The counts at the end then add how many there were, as `5 without h3`.
 
 **One request means one.** The next route is for when connecting failed. Once a request has gone out,
 the host has been asked, so that a timeout or a response cut short ends it there, as a failure.

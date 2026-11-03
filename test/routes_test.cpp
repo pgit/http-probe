@@ -289,6 +289,32 @@ TEST(Plan, TreatsARecordWithAnInvalidPortAsNoRecord)
    EXPECT_THAT(routes(plan), ElementsAre("h2 example.com:443"));
 }
 
+TEST(HasH3Record, IsTrueForARecordThatOffersIt)
+{
+   EXPECT_TRUE(has_h3_record(found({record(1, ".", {"alpn=h3"})})));
+   EXPECT_TRUE(has_h3_record(found({record(1, ".", {"alpn=h2,h3"})})));
+   EXPECT_TRUE(has_h3_record(found({record(1, ".", {"alpn=h2"}), record(2, ".", {"alpn=h3"})})));
+}
+
+TEST(HasH3Record, DoesNotCareWhereTheRecordPoints)
+{
+   EXPECT_TRUE(has_h3_record(found({record(1, "other.example", {"alpn=h3"})})));
+}
+
+TEST(HasH3Record, IsFalseForAnythingElse)
+{
+   EXPECT_FALSE(has_h3_record(found({})));
+   EXPECT_FALSE(has_h3_record(found({record(1, ".")})));
+   EXPECT_FALSE(has_h3_record(found({record(1, ".", {"alpn=h2"})})));
+   EXPECT_FALSE(has_h3_record(found({record(1, ".", {"alpn=h3-29,h2"})})));
+}
+
+TEST(HasH3Record, IgnoresARecordThatHasToBeIgnored)
+{
+   EXPECT_FALSE(has_h3_record(found({record(1, ".", {"alpn=h3", "mandatory=ech", "ech=dead"})})));
+   EXPECT_FALSE(has_h3_record(found({record(1, ".", {"alpn=h3", "port=none"})})));
+}
+
 TEST(Plan, PassesOnWhatWentWrongInTheLookup)
 {
    auto records = found({});

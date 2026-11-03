@@ -210,6 +210,14 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found, std::uint16
    return plan;
 }
 
+bool has_h3_record(const ServiceRecords& found)
+{
+   return std::ranges::any_of(found.records, [](const c_ares_async::https_record& record) {
+      const auto service = parse_service(record);
+      return !service.incompatible && service.offers("h3");
+   });
+}
+
 // =================================================================================================
 
 } // namespace http_probe
