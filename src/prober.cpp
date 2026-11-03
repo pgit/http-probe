@@ -2,11 +2,11 @@
 
 #include <anyhttp/session.hpp>
 
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/deferred.hpp>
-#include <boost/asio/experimental/parallel_group.hpp>
-#include <boost/asio/ip/address.hpp>
 #include <boost/beast/http/field.hpp>
+#include <boost/capy/cond.hpp>
+#include <boost/capy/when_all.hpp>
+#include <boost/corosio/ip_address.hpp>
+#include <boost/corosio/timeout.hpp>
 #include <boost/url/parse.hpp>
 #include <boost/url/url.hpp>
 
@@ -18,6 +18,7 @@
 #include <format>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 #include <variant>
 
 namespace http = boost::beast::http;
@@ -63,8 +64,7 @@ bool is_host_name(std::string_view host)
    const auto is_name_char = [](unsigned char c) {
       return std::isalnum(c) != 0 || c == '-' || c == '.' || c == '_';
    };
-   boost::system::error_code not_an_address;
-   boost::asio::ip::make_address(host, not_an_address);
+   const auto [not_an_address, address] = corosio::make_ip_address(host);
    return !host.empty() && host.size() <= 253 && std::ranges::all_of(host, is_name_char) &&
           not_an_address;
 }
@@ -95,13 +95,12 @@ std::vector<std::string> read_hosts(std::istream& list, std::vector<std::string>
    return hosts;
 }
 
-void prefer_ipv6(std::vector<anyhttp::TcpEndpoint>& addresses)
+void prefer_ipv6(std::vector<corosio::endpoint>& addresses)
 {
-   std::ranges::stable_partition(addresses,
-                                 [](const auto& endpoint) { return endpoint.address().is_v6(); });
+   std::ranges::stable_partition(addresses, &corosio::endpoint::is_v6);
 }
 
-Prober::Prober(anyhttp::Executor executor, Config config, Observer observer)
+Prober::Prober(capy::any_executor executor, Config config, Observer observer)
    : executor_(executor), config_(std::move(config)), observer_(std::move(observer)),
      resolver_(std::move(executor))
 {
@@ -127,30 +126,23 @@ Prober::Prober(anyhttp::Executor executor, Config config, Observer observer)
             std::format("invalid DNS server '{}': {}", config_.dns_server, ec.message()));
 }
 
-anyhttp::Task<void> Prober::run()
+capy::task<> Prober::run()
 {
-   namespace asio = boost::asio;
-   using Worker = decltype(asio::co_spawn(executor_, work(), asio::deferred));
-
-   std::vector<Worker> workers;
+   std::vector<capy::task<capy::results<>>> workers;
    for (std::size_t i = 0; i < std::min(config_.concurrency, hosts_.size()); ++i)
-      workers.push_back(asio::co_spawn(executor_, work(), asio::deferred));
+      workers.push_back(work());
 
-   auto [order, exceptions] = co_await asio::experimental::make_parallel_group(std::move(workers))
-                                 .async_wait(asio::experimental::wait_for_all(), asio::deferred);
-
-   for (const auto& exception : exceptions)
-      if (exception)
-         std::rethrow_exception(exception);
+   std::ignore = co_await capy::when_all(std::move(workers));
 }
 
-anyhttp::Task<void> Prober::work()
+capy::task<capy::results<>> Prober::work()
 {
    while (next_host_ < hosts_.size())
    {
       const auto& host = hosts_[next_host_++];
       observer_(co_await probe(host));
    }
+   co_return capy::results<>{};
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -160,7 +152,7 @@ anyhttp::Task<void> Prober::work()
 // that fails is not fatal: DNS is not protected here, and this is the choice section 3.1 leaves
 // for that. A name without a record is the common case and not even worth a note.
 //
-anyhttp::Task<ServiceRecords> Prober::resolve_service(const std::string& host)
+capy::task<ServiceRecords> Prober::resolve_service(const std::string& host)
 {
    ServiceRecords found{.owner = host};
    std::set<std::string> visited{found.owner};
@@ -220,7 +212,7 @@ anyhttp::Task<ServiceRecords> Prober::resolve_service(const std::string& host)
       .owner = host, .notes = {std::format("alias chain of '{}' is too long or has a loop", host)}};
 }
 
-anyhttp::Task<Result> Prober::probe(const std::string& host)
+capy::task<Result> Prober::probe(const std::string& host)
 {
    Result result{.host = host};
 
@@ -266,14 +258,14 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
    for (const auto& route : plan.routes)
    {
       const auto deadline = std::chrono::steady_clock::now() + config_.timeout;
-      for (auto endpoint : addresses)
+      for (const auto& address : addresses)
       {
-         endpoint.port(route.port);
+         const corosio::endpoint endpoint(address, route.port);
          result.address = endpoint.address().to_string();
          spdlog::debug("{}: connecting to {} by {}, for {}", host, result.address,
                        route.to_string(), route.source);
-         auto response = co_await attempt(route, host, endpoint, deadline);
-         if (response.ec)
+         auto [ec, response] = co_await attempt(route, host, endpoint, deadline);
+         if (ec)
          {
             result.error = std::format("[{}] {}", route.to_string(), response.error);
             result.notes.push_back(std::format("{} at {}", result.error, result.address));
@@ -306,9 +298,9 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
 // asks for the host's root, by the deadline. After that it ends the connection in an orderly way,
 // which has limits of its own and is none of the timeout's business: the response is there by then.
 //
-anyhttp::Task<Prober::Response> Prober::attempt(const Route& route, const std::string& host,
-                                                const anyhttp::TcpEndpoint& endpoint,
-                                                std::chrono::steady_clock::time_point deadline)
+capy::task<capy::results<Prober::Response>>
+Prober::attempt(const Route& route, const std::string& host, const corosio::endpoint& endpoint,
+                std::chrono::steady_clock::time_point deadline)
 {
    anyhttp::client::Config client_config;
    client_config.protocol = route.protocol;
@@ -329,45 +321,45 @@ anyhttp::Task<Prober::Response> Prober::attempt(const Route& route, const std::s
    bool request_sent = false;
 
    //
-   // These stay around for as long as exchange() needs them: when_either() waits for what it has
+   // These stay around for as long as exchange() needs them: timeout() waits for what it has
    // cancelled to finish.
    //
-   auto result = co_await anyhttp::when_either(
+   auto [ec, response] = co_await corosio::timeout(
       exchange(client, session, request_sent, boost::urls::url(std::format("https://{}/", host))),
-      anyhttp::delay(std::chrono::ceil<std::chrono::milliseconds>(deadline - start)));
+      deadline);
 
-   auto* exchanged = std::get_if<0>(&result);
-   if (!exchanged)
-      co_return Response{.ec = make_error_code(boost::system::errc::timed_out),
-                         .error = std::format("timed out after {}", config_.timeout),
-                         .request_sent = request_sent};
-
-   auto response = std::move(*exchanged);
    response.request_sent = request_sent;
+   if (ec == capy::cond::timeout)
+   {
+      response.error = std::format("timed out after {}", config_.timeout);
+      co_return {ec, std::move(response)};
+   }
+
    response.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - start);
 
-   if (!response.ec)
-      if (auto [ec] = co_await session.shutdown(); ec)
-         spdlog::debug("{}: shutdown: {}", host, ec.message());
+   if (!ec)
+      if (auto [shutdown_ec] = co_await session.shutdown(); shutdown_ec)
+         spdlog::debug("{}: shutdown: {}", host, shutdown_ec.message());
 
-   co_return response;
+   co_return {ec, std::move(response)};
 }
 
 //
-// Everything is reported rather than thrown: when_either() would otherwise sit out the timeout, as
-// what throws does not count as having finished first.
+// Everything is reported rather than thrown: one host that makes anyhttp throw does not get to end
+// the run for the others.
 //
-anyhttp::Task<Prober::Response> Prober::exchange(anyhttp::client::Client& client,
-                                                 anyhttp::Session& session, bool& request_sent,
-                                                 boost::urls::url url)
+capy::task<capy::results<Prober::Response>> Prober::exchange(anyhttp::client::Client& client,
+                                                             anyhttp::Session& session,
+                                                             bool& request_sent,
+                                                             boost::urls::url url)
 {
    try
    {
       auto [connect_ec, connected] = co_await client.connect();
       if (connect_ec)
-         co_return Response{.ec = connect_ec,
-                            .error = std::format("connect: {}", connect_ec.message())};
+         co_return {connect_ec,
+                    Response{.error = std::format("connect: {}", connect_ec.message())}};
 
       session = std::move(connected);
 
@@ -375,15 +367,14 @@ anyhttp::Task<Prober::Response> Prober::exchange(anyhttp::client::Client& client
       headers.set(http::field::user_agent, user_agent);
       request_sent = true;
       auto [get_ec, message] = co_await session.get(std::move(url), std::move(headers));
-      co_return Response{.ec = get_ec,
-                         .message = std::move(message),
-                         .error = get_ec ? std::format("request: {}", get_ec.message()) : "",
-                         .protocol = session.protocol()};
+      co_return {get_ec,
+                 Response{.message = std::move(message),
+                          .error = get_ec ? std::format("request: {}", get_ec.message()) : "",
+                          .protocol = session.protocol()}};
    }
    catch (const std::exception& ex)
    {
-      co_return Response{.ec = make_error_code(boost::system::errc::connection_aborted),
-                         .error = ex.what()};
+      co_return {std::make_error_code(std::errc::connection_aborted), Response{.error = ex.what()}};
    }
 }
 

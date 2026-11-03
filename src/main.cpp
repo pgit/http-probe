@@ -4,8 +4,8 @@
 #include "output.hpp"
 #include "prober.hpp"
 
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/io_context.hpp>
+#include <boost/capy/ex/run_async.hpp>
+#include <boost/corosio/io_context.hpp>
 #include <boost/program_options.hpp>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -207,22 +207,30 @@ int main(int argc, char* argv[])
          }
       };
 
-      boost::asio::io_context context;
+      boost::corosio::io_context context;
       http_probe::Prober prober(context.get_executor(), std::move(config), report);
-      boost::asio::co_spawn(context, prober.run(), [&](const std::exception_ptr& ex) {
-         if (ex)
-            std::rethrow_exception(ex);
+      std::exception_ptr failed;
 
-         //
-         // Here and not after run(): a host that did not answer can keep the context from running
-         // dry for a while, see the README, and this is what the wait would be for.
-         //
-         std::println(stderr, "{}", http_probe::format_summary(counts, color_summary));
-         if (with_records == 0 && !own_dns_server)
-            std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
-                                 "resolver answers for them, so try --dns-server.");
-      });
+      //
+      // What a handler throws ends the process, so it stays in here until the context is through.
+      // Printing here and not after run(): a host that did not answer can keep the context from
+      // running dry for a while, see the README, and this is what the wait would be for.
+      //
+      boost::capy::run_async(
+         context.get_executor(),
+         [&]() noexcept {
+            std::println(stderr, "{}", http_probe::format_summary(counts, color_summary));
+            if (with_records == 0 && !own_dns_server)
+               std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
+                                    "resolver answers for them, so try --dns-server.");
+         },
+         [&](std::exception_ptr ex) noexcept {
+            failed = ex;
+            context.stop();
+         })(prober.run());
       context.run();
+      if (failed)
+         std::rethrow_exception(failed);
    }
    catch (const std::invalid_argument& ex)
    {

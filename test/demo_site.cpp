@@ -4,18 +4,31 @@
 //
 #include "site.hpp"
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/signal_set.hpp>
+#include <boost/capy/ex/run_async.hpp>
+#include <boost/capy/task.hpp>
+#include <boost/corosio/io_context.hpp>
+#include <boost/corosio/signal_set.hpp>
 
 #include <spdlog/spdlog.h>
 
+#include <csignal>
 #include <print>
+#include <tuple>
+
+namespace capy = boost::capy;
+namespace corosio = boost::corosio;
+
+static capy::task<> stop_on_signal(corosio::signal_set& signals, http_probe::test::Site& site)
+{
+   std::ignore = co_await signals.wait();
+   site.stop();
+}
 
 int main()
 {
    spdlog::set_level(spdlog::level::err);
 
-   boost::asio::io_context context;
+   corosio::io_context context;
    http_probe::test::Site site(context.get_executor());
 
    site.dns().add_https("localhost", 1, ".",
@@ -30,7 +43,7 @@ int main()
                 site.ca_file().string());
    std::fflush(stdout);
 
-   boost::asio::signal_set signals(context, SIGINT, SIGTERM);
-   signals.async_wait([&](auto, auto) { site.stop(); });
+   corosio::signal_set signals(context, SIGINT, SIGTERM);
+   capy::run_async(context.get_executor())(stop_on_signal(signals, site));
    context.run();
 }

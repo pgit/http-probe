@@ -5,11 +5,13 @@
 #include "prober.hpp"
 #include "site.hpp"
 
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/ip/address.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/asio/ip/udp.hpp>
+#include <boost/capy/ex/run_async.hpp>
+#include <boost/capy/task.hpp>
+#include <boost/corosio/io_context.hpp>
+#include <boost/corosio/ip_address.hpp>
+#include <boost/corosio/ipv6_address.hpp>
+#include <boost/corosio/tcp_acceptor.hpp>
+#include <boost/corosio/udp_socket.hpp>
 
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
@@ -21,9 +23,12 @@
 #include <exception>
 #include <format>
 #include <memory>
+#include <ostream>
 #include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -36,8 +41,27 @@ using testing::HasSubstr;
 using testing::IsEmpty;
 using testing::Pair;
 
+namespace boost::corosio
+{
+
+/// What a failed expectation shows of an endpoint: Corosio has no output operator for one.
+inline void PrintTo(const endpoint& endpoint, std::ostream* out)
+{
+   *out << endpoint.address() << ':' << endpoint.port();
+}
+
+} // namespace boost::corosio
+
 namespace
 {
+
+corosio::ip_address make_address(std::string_view text)
+{
+   auto [ec, address] = corosio::make_ip_address(text);
+   if (ec)
+      throw std::system_error(ec, std::string(text));
+   return address;
+}
 
 fake_dns_server::svc_param port_param(std::uint16_t port)
 {
@@ -81,24 +105,49 @@ protected:
       Prober prober(context.get_executor(), std::move(config),
                     [this](const Result& result) { results.push_back(result); });
 
-      boost::asio::co_spawn(
-         context,
-         [&]() -> anyhttp::Task<void> {
-            co_await prober.run();
-            site.stop();
-            //
-            // For the tests with a QUIC endpoint that never answers. anyhttp does not close a
-            // session whose connect() was cancelled: it goes on sending until its idle timeout of
-            // 30 seconds, and the context does not run dry before that. To go once that is fixed.
-            //
-            if (abandon_quic_sessions)
-               context.stop();
-         },
-         [](const std::exception_ptr& ex) {
-            if (ex)
-               std::rethrow_exception(ex);
-         });
+      //
+      // In a variable: the coroutine refers to what the lambda captured, for as long as it runs.
+      //
+      const auto run = [&]() -> capy::task<> {
+         co_await prober.run();
+         site.stop();
+         //
+         // For the tests with a QUIC endpoint that never answers. anyhttp does not close a
+         // session whose connect() was cancelled: it goes on sending until its idle timeout of
+         // 30 seconds, and the context does not run dry before that. To go once that is fixed.
+         //
+         if (abandon_quic_sessions)
+            context.stop();
+      };
+
+      std::exception_ptr failed;
+      capy::run_async(
+         context.get_executor(), []() noexcept {},
+         [&](std::exception_ptr ex) noexcept {
+            failed = ex;
+            context.stop();
+         })(run());
       context.run();
+      if (failed)
+         std::rethrow_exception(failed);
+   }
+
+   //
+   // A port where nothing is ever going to answer, on any address that "localhost" may be.
+   //
+   corosio::udp_socket silent_udp_socket()
+   {
+      corosio::udp_socket socket(context);
+      if (const auto ec = socket.open(corosio::family::v6))
+         throw std::system_error(ec, "open");
+      if (const auto ec = socket.bind({corosio::ipv6_address::any(), 0}))
+         throw std::system_error(ec, "bind");
+      return socket;
+   }
+
+   corosio::tcp_acceptor silent_tcp_acceptor()
+   {
+      return corosio::tcp_acceptor(context, {corosio::ipv6_address::any(), 0});
    }
 
    //
@@ -125,7 +174,7 @@ protected:
    }
 
    int quiet_ = quiet(); // ahead of the server, which already has something to say when it starts
-   boost::asio::io_context context;
+   corosio::io_context context;
    Site site{context.get_executor()};
    std::vector<Result> results;
    bool abandon_quic_sessions = false;
@@ -323,7 +372,7 @@ TEST_F(Probe, ReportsEachHostOnceHoweverManyThereAre)
 
 TEST_F(Probe, DoesNotLetASlowHostHoldUpTheOthers)
 {
-   boost::asio::ip::udp::socket silent(context, {boost::asio::ip::udp::v6(), 0});
+   auto silent = silent_udp_socket();
    abandon_quic_sessions = true;
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
 
@@ -339,7 +388,7 @@ TEST_F(Probe, DoesNotLetASlowHostHoldUpTheOthers)
 
 TEST_F(Probe, WorksOnOneHostAtATimeIfToldTo)
 {
-   boost::asio::ip::udp::socket silent(context, {boost::asio::ip::udp::v6(), 0});
+   auto silent = silent_udp_socket();
    abandon_quic_sessions = true;
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
 
@@ -449,7 +498,7 @@ TEST_F(Probe, FallsBackToTheNextRecordWhenAConnectionFails)
    // Nothing answers on this port. The socket is ours for the length of the test, so that nothing
    // else will either.
    //
-   boost::asio::ip::udp::socket silent(context, {boost::asio::ip::udp::v6(), 0});
+   auto silent = silent_udp_socket();
    abandon_quic_sessions = true;
 
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
@@ -468,7 +517,7 @@ TEST_F(Probe, FallsBackToTheNextRecordWhenAConnectionFails)
 
 TEST_F(Probe, FallsBackFromHttp3ToTcpWhenAConnectionFails)
 {
-   boost::asio::ip::udp::socket silent(context, {boost::asio::ip::udp::v6(), 0});
+   auto silent = silent_udp_socket();
    abandon_quic_sessions = true;
 
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
@@ -547,8 +596,7 @@ TEST_F(Probe, SaysWhichAddressAnswered)
 
    ASSERT_EQ(results.size(), 1u);
    ASSERT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
-   EXPECT_TRUE(boost::asio::ip::make_address(results[0].address).is_loopback())
-      << results[0].address;
+   EXPECT_TRUE(make_address(results[0].address).is_loopback()) << results[0].address;
 }
 
 TEST_F(Probe, SaysWhichAddressAnsweredOverTcp)
@@ -560,8 +608,7 @@ TEST_F(Probe, SaysWhichAddressAnsweredOverTcp)
 
    ASSERT_EQ(results.size(), 1u);
    ASSERT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
-   EXPECT_TRUE(boost::asio::ip::make_address(results[0].address).is_loopback())
-      << results[0].address;
+   EXPECT_TRUE(make_address(results[0].address).is_loopback()) << results[0].address;
 }
 
 //
@@ -631,10 +678,7 @@ TEST_F(Probe, TriesIPv6First)
    EXPECT_EQ(results[0].address, "127.0.0.1"); // the last one tried
 }
 
-anyhttp::TcpEndpoint at(const char* address)
-{
-   return {boost::asio::ip::make_address(address), 443};
-}
+corosio::endpoint at(const char* address) { return {make_address(address), 443}; }
 
 TEST(PreferIpv6, MovesIPv6ToTheFrontAndKeepsTheOrderWithinEachFamily)
 {
@@ -800,7 +844,7 @@ TEST_F(Probe, LogsTheHttpAndTheLookupsAtDebugLevel)
 
 TEST_F(Probe, GivesUpOnAServerThatDoesNotAnswer)
 {
-   boost::asio::ip::udp::socket silent(context, {boost::asio::ip::udp::v6(), 0});
+   auto silent = silent_udp_socket();
    abandon_quic_sessions = true;
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
 
@@ -818,7 +862,7 @@ TEST_F(Probe, GivesUpOnATcpServerThatDoesNotAnswer)
    //
    // It takes connections, as the kernel does that for it, and leaves the handshake hanging.
    //
-   boost::asio::ip::tcp::acceptor silent(context, {boost::asio::ip::tcp::v6(), 0});
+   auto silent = silent_tcp_acceptor();
    site.dns().add_https("localhost", 1, ".", h2_at(silent.local_endpoint().port()));
 
    auto configuration = config();
@@ -834,7 +878,7 @@ TEST_F(Probe, ReportsAPortThatIsClosed)
 {
    std::uint16_t closed = 0;
    {
-      boost::asio::ip::tcp::acceptor acceptor(context, {boost::asio::ip::tcp::v6(), 0});
+      auto acceptor = silent_tcp_acceptor();
       closed = acceptor.local_endpoint().port();
    }
    site.dns().add_https("localhost", 1, ".", h2_at(closed));

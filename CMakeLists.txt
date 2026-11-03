@@ -24,8 +24,12 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     set(Boost_USE_STATIC_LIBS ON)
 endif()
 
-# I/O runtime: ASIO or COROSIO. COROSIO would have to declare the capy and corosio pins here, too.
-set(ANYHTTP_API ASIO)
+#
+# I/O runtime: Capy and Corosio, and only those. The libraries take either, which is their business:
+# this is a program, and it gets to decide. These shadow the cache entries of the libraries, which
+# go on saying ASIO in CMakeCache.txt.
+#
+set(ANYHTTP_API COROSIO)
 set(C_ARES_ASYNC_API ${ANYHTTP_API})
 
 #
@@ -50,6 +54,22 @@ FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
     GIT_TAG 6d46c6c8e65231f23a250bcec5dd00b3a1d9ba34
     SYSTEM)
+
+#
+# Both libraries pin these as well, to the same commits for now. The first declaration wins, so these
+# are the ones both of them get, and here they are SYSTEM, too.
+#
+FetchContent_Declare(capy
+    GIT_REPOSITORY https://github.com/cppalliance/capy.git
+    GIT_TAG 24c54af2cf967ccbf8d3809af4bcd9c8f61f553b
+    EXCLUDE_FROM_ALL
+    SYSTEM)
+FetchContent_Declare(corosio
+    GIT_REPOSITORY https://github.com/cppalliance/corosio.git
+    GIT_TAG 41d0de18b6e4fa1b397c38a866f2daf52c6c36b5
+    EXCLUDE_FROM_ALL
+    SYSTEM)
+
 FetchContent_MakeAvailable(anyhttp c_ares_async)
 
 # Only for the command line. Neither library needs this component, so neither asks for it here.

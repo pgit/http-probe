@@ -4,9 +4,17 @@
 // server has a certificate for "localhost". That name comes from /etc/hosts and not from the DNS
 // server, which a test can only have the last word on with a name that the certificate is not for.
 //
+// The DNS server comes from the tests of c-ares-async, where it is on Asio whatever the runtime. So
+// it has a context of its own, which a coroutine polls from the one thread that everything runs on:
+// a server on a thread of its own would race whoever looks at what it was asked.
+//
 #pragma once
 
 #include <anyhttp/server.hpp>
+
+#include <boost/asio/io_context.hpp>
+#include <boost/capy/ex/any_executor.hpp>
+#include <boost/capy/task.hpp>
 
 #include <fake_dns_server.hpp>
 #include <test_certificate.hpp>
@@ -16,6 +24,7 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -46,7 +55,7 @@ public:
       std::chrono::steady_clock::time_point time;
    };
 
-   explicit Site(const anyhttp::Executor& executor);
+   explicit Site(const boost::capy::any_executor& executor);
    ~Site();
 
    /// A path that has no page gets a 404.
@@ -70,7 +79,8 @@ public:
    void stop();
 
 private:
-   void start(const anyhttp::Executor& executor);
+   void start(const boost::capy::any_executor& executor);
+   boost::capy::task<> poll_dns();
 
    std::filesystem::path directory_;
    std::filesystem::path certificate_file_;
@@ -78,7 +88,9 @@ private:
    std::map<std::string, Page> pages_;
    std::shared_ptr<std::vector<Request>> requests_;
    std::optional<anyhttp::server::Server> server_;
+   boost::asio::io_context dns_context_;
    std::optional<fake_dns_server> dns_;
+   std::stop_source polling_;
    std::vector<fake_dns_server::query> queries_; // what the DNS server knew when it was stopped
    std::uint16_t port_ = 0;
 };

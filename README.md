@@ -85,4 +85,4 @@ cmake --build --preset pinned
 ctest --preset pinned
 ```
 
-The tree is `build/`, with clang, libc++, OpenSSL and the Asio runtime.
+The tree is `build/`, with clang, libc++, OpenSSL and Capy and Corosio as the runtime.

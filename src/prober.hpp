@@ -9,6 +9,11 @@
 
 #include <c_ares_async/resolver.hpp>
 
+#include <boost/capy/ex/any_executor.hpp>
+#include <boost/capy/results.hpp>
+#include <boost/capy/task.hpp>
+#include <boost/corosio/endpoint.hpp>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +26,9 @@
 
 namespace http_probe
 {
+
+namespace capy = boost::capy;
+namespace corosio = boost::corosio;
 
 // =================================================================================================
 
@@ -58,7 +66,7 @@ bool is_host_name(std::string_view host);
 std::vector<std::string> read_hosts(std::istream& list, std::vector<std::string>& skipped);
 
 /// Moves the IPv6 addresses to the front, each family keeping the order it was in.
-void prefer_ipv6(std::vector<anyhttp::TcpEndpoint>& addresses);
+void prefer_ipv6(std::vector<corosio::endpoint>& addresses);
 
 /// What came of one host.
 struct Result
@@ -107,14 +115,13 @@ public:
 
    /// Throws \c std::invalid_argument for a configuration that is not good to go, and does nothing
    /// else until run().
-   Prober(anyhttp::Executor executor, Config config, Observer observer);
+   Prober(capy::any_executor executor, Config config, Observer observer);
 
-   anyhttp::Task<void> run();
+   capy::task<> run();
 
 private:
    struct Response
    {
-      anyhttp::error_code ec;
       anyhttp::client::Message message;
       std::string error;
       anyhttp::Protocol protocol = anyhttp::Protocol::h3; ///< what the server chose to speak
@@ -122,16 +129,17 @@ private:
       std::chrono::milliseconds duration{};
    };
 
-   anyhttp::Task<void> work();
-   anyhttp::Task<ServiceRecords> resolve_service(const std::string& host);
-   anyhttp::Task<Result> probe(const std::string& host);
-   anyhttp::Task<Response> attempt(const Route& route, const std::string& host,
-                                   const anyhttp::TcpEndpoint& endpoint,
-                                   std::chrono::steady_clock::time_point deadline);
-   anyhttp::Task<Response> exchange(anyhttp::client::Client& client, anyhttp::Session& session,
-                                    bool& request_sent, boost::urls::url url);
+   capy::task<capy::results<>> work();
+   capy::task<ServiceRecords> resolve_service(const std::string& host);
+   capy::task<Result> probe(const std::string& host);
+   capy::task<capy::results<Response>> attempt(const Route& route, const std::string& host,
+                                               const corosio::endpoint& endpoint,
+                                               std::chrono::steady_clock::time_point deadline);
+   capy::task<capy::results<Response>> exchange(anyhttp::client::Client& client,
+                                                anyhttp::Session& session, bool& request_sent,
+                                                boost::urls::url url);
 
-   anyhttp::Executor executor_;
+   capy::any_executor executor_;
    Config config_;
    Observer observer_;
    std::vector<std::string> hosts_;
