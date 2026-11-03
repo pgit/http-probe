@@ -46,9 +46,10 @@ what the server went for, which may be HTTP/1.1 where HTTP/2 was offered.
 the host has been asked, so that a timeout or a response cut short ends it there, as a failure.
 
 The address comes from c-ares, so `--dns-server` applies to it, and `/etc/hosts` as well. The address
-hints in a record do not. Addresses are tried one at a time, in the order c-ares sorts them, within
-the timeout of the route, until one of them can be connected to. A failure says which address it was
-on. Certificates are always verified, against the host's name.
+hints in a record do not. Addresses are tried one at a time, IPv6 first and otherwise in the order
+c-ares sorts them, within the timeout of the route, until one of them can be connected to. So an IPv6
+address that does not answer at all takes the whole timeout of the route, and IPv4 does not get a turn.
+A failure says which address it was on. Certificates are always verified, against the host's name.
 
 **To see what is going on,** `-v` logs to stderr: the requests and responses from anyhttp, the queries
 from c-ares and the steps in between. `-vv` adds all of QUIC. Hosts run at the same time mix in the

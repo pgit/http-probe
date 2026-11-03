@@ -610,6 +610,51 @@ TEST_F(Probe, TriesTheNextAddressWhenAConnectionFails)
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 
+//
+// This one would hold without prefer_ipv6(), as c-ares puts ::1 ahead of 127.0.0.1 by itself. An
+// address that it would put behind IPv4 is not on loopback, so the order is tested on its own
+// below.
+//
+TEST_F(Probe, TriesIPv6First)
+{
+   site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));
+   site.dns().add_address("site.example.test", "127.0.0.1");
+   site.dns().add_address("site.example.test", "::1");
+
+   probe(config({"site.example.test"}));
+
+   ASSERT_EQ(results.size(), 1u);
+   const auto text = notes(results[0]);
+   ASSERT_THAT(text, HasSubstr("at ::1"));
+   ASSERT_THAT(text, HasSubstr("at 127.0.0.1"));
+   EXPECT_LT(text.find("at ::1"), text.find("at 127.0.0.1"));
+   EXPECT_EQ(results[0].address, "127.0.0.1"); // the last one tried
+}
+
+anyhttp::TcpEndpoint at(const char* address)
+{
+   return {boost::asio::ip::make_address(address), 443};
+}
+
+TEST(PreferIpv6, MovesIPv6ToTheFrontAndKeepsTheOrderWithinEachFamily)
+{
+   std::vector addresses{at("192.0.2.1"), at("2001:db8::1"), at("192.0.2.2"), at("2001:db8::2")};
+
+   prefer_ipv6(addresses);
+
+   EXPECT_THAT(addresses,
+               ElementsAre(at("2001:db8::1"), at("2001:db8::2"), at("192.0.2.1"), at("192.0.2.2")));
+}
+
+TEST(PreferIpv6, LeavesASingleFamilyAlone)
+{
+   std::vector addresses{at("192.0.2.2"), at("192.0.2.1")};
+
+   prefer_ipv6(addresses);
+
+   EXPECT_THAT(addresses, ElementsAre(at("192.0.2.2"), at("192.0.2.1")));
+}
+
 TEST_F(Probe, DoesNotConnectWithoutAnAddress)
 {
    site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));

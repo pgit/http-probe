@@ -95,6 +95,12 @@ std::vector<std::string> read_hosts(std::istream& list, std::vector<std::string>
    return hosts;
 }
 
+void prefer_ipv6(std::vector<anyhttp::TcpEndpoint>& addresses)
+{
+   std::ranges::stable_partition(addresses,
+                                 [](const auto& endpoint) { return endpoint.address().is_v6(); });
+}
+
 Prober::Prober(anyhttp::Executor executor, Config config, Observer observer)
    : executor_(executor), config_(std::move(config)), observer_(std::move(observer)),
      resolver_(std::move(executor))
@@ -241,7 +247,7 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
    // host, and no record says that it has to have one.
    //
    spdlog::debug("{}: asking for the addresses of '{}'", host, host);
-   const auto [lookup_ec, addresses] = co_await resolver_.resolve(host, "");
+   auto [lookup_ec, addresses] = co_await resolver_.resolve(host, "");
    if (lookup_ec || addresses.empty())
    {
       result.outcome = Result::Outcome::lookup_failed;
@@ -249,6 +255,12 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
                                          lookup_ec ? lookup_ec.message() : "no addresses"));
       co_return result;
    }
+
+   //
+   // One after the other, and not at the same time as with Happy Eyeballs. c-ares goes by RFC 6724,
+   // which puts IPv4 first wherever the source address is not a global one.
+   //
+   prefer_ipv6(addresses);
 
    result.outcome = Result::Outcome::failed;
    for (const auto& route : plan.routes)

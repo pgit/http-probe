@@ -57,6 +57,9 @@ bool is_host_name(std::string_view host);
  */
 std::vector<std::string> read_hosts(std::istream& list, std::vector<std::string>& skipped);
 
+/// Moves the IPv6 addresses to the front, each family keeping the order it was in.
+void prefer_ipv6(std::vector<anyhttp::TcpEndpoint>& addresses);
+
 /// What came of one host.
 struct Result
 {
@@ -89,10 +92,10 @@ struct Result
 /**
  * Looks up the HTTPS records and the addresses of each of Config::hosts with the resolver of
  * c-ares-async, and sends one request to each host that can be connected to (see plan_routes()),
- * trying its addresses in the order they came in, on each route. A response is what comes
- * back, whatever its status: a redirect is reported and not followed, nothing in the body is looked
- * at, and nothing else on the host is requested. The next route is for a connection that did not
- * come about: once a request has gone out, that was it for this host, however it ended.
+ * trying its addresses one at a time on each route, IPv6 first. A response is what comes back,
+ * whatever its status: a redirect is reported and not followed, nothing in the body is looked at,
+ * and nothing else on the host is requested. The next route is for a connection that did not come
+ * about: once a request has gone out, that was it for this host, however it ended.
  *
  * Hosts are worked on Config::concurrency at a time, so results arrive as they are ready. All of
  * this is on the one executor, which is also what calls the observer.
