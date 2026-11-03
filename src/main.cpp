@@ -212,18 +212,10 @@ int main(int argc, char* argv[])
       std::exception_ptr failed;
 
       //
-      // What a handler throws ends the process, so it stays in here until the context is through.
-      // Printing here and not after run(): a host that did not answer can keep the context from
-      // running dry for a while, see the README, and this is what the wait would be for.
+      // What a handler throws ends the process, so this one leaves it for after run().
       //
       boost::capy::run_async(
-         context.get_executor(),
-         [&]() noexcept {
-            std::println(stderr, "{}", http_probe::format_summary(counts, color_summary));
-            if (with_records == 0 && !own_dns_server)
-               std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
-                                    "resolver answers for them, so try --dns-server.");
-         },
+         context.get_executor(), []() noexcept {},
          [&](std::exception_ptr ex) noexcept {
             failed = ex;
             context.stop();
@@ -231,6 +223,11 @@ int main(int argc, char* argv[])
       context.run();
       if (failed)
          std::rethrow_exception(failed);
+
+      std::println(stderr, "{}", http_probe::format_summary(counts, color_summary));
+      if (with_records == 0 && !own_dns_server)
+         std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
+                              "resolver answers for them, so try --dns-server.");
    }
    catch (const std::invalid_argument& ex)
    {

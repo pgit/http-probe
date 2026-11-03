@@ -111,13 +111,6 @@ protected:
       const auto run = [&]() -> capy::task<> {
          co_await prober.run();
          site.stop();
-         //
-         // For the tests with a QUIC endpoint that never answers. anyhttp does not close a
-         // session whose connect() was cancelled: it goes on sending until its idle timeout of
-         // 30 seconds, and the context does not run dry before that. To go once that is fixed.
-         //
-         if (abandon_quic_sessions)
-            context.stop();
       };
 
       std::exception_ptr failed;
@@ -177,7 +170,6 @@ protected:
    corosio::io_context context;
    Site site{context.get_executor()};
    std::vector<Result> results;
-   bool abandon_quic_sessions = false;
 };
 
 } // namespace
@@ -373,7 +365,6 @@ TEST_F(Probe, ReportsEachHostOnceHoweverManyThereAre)
 TEST_F(Probe, DoesNotLetASlowHostHoldUpTheOthers)
 {
    auto silent = silent_udp_socket();
-   abandon_quic_sessions = true;
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
 
    auto configuration = config({"localhost", "nowhere.example.test"});
@@ -389,7 +380,6 @@ TEST_F(Probe, DoesNotLetASlowHostHoldUpTheOthers)
 TEST_F(Probe, WorksOnOneHostAtATimeIfToldTo)
 {
    auto silent = silent_udp_socket();
-   abandon_quic_sessions = true;
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
 
    auto configuration = config({"localhost", "nowhere.example.test"});
@@ -499,7 +489,6 @@ TEST_F(Probe, FallsBackToTheNextRecordWhenAConnectionFails)
    // else will either.
    //
    auto silent = silent_udp_socket();
-   abandon_quic_sessions = true;
 
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
    site.dns().add_https("localhost", 2, ".", h3_at(site.port()));
@@ -518,7 +507,6 @@ TEST_F(Probe, FallsBackToTheNextRecordWhenAConnectionFails)
 TEST_F(Probe, FallsBackFromHttp3ToTcpWhenAConnectionFails)
 {
    auto silent = silent_udp_socket();
-   abandon_quic_sessions = true;
 
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
    site.dns().add_https("localhost", 2, ".", h2_at(site.port()));
@@ -845,7 +833,6 @@ TEST_F(Probe, LogsTheHttpAndTheLookupsAtDebugLevel)
 TEST_F(Probe, GivesUpOnAServerThatDoesNotAnswer)
 {
    auto silent = silent_udp_socket();
-   abandon_quic_sessions = true;
    site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
 
    auto configuration = config();

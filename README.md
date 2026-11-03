@@ -59,9 +59,6 @@ anyhttp puts them into some of its log messages regardless.
 **Use `--dns-server`.** The resolver in the devcontainer answers with no data for HTTPS records, even
 where they exist, which looks just like no host having any.
 
-**The program can take a while to end.** If a host did not answer over HTTP/3, anyhttp goes on sending
-to it for 30 seconds after the timeout. The counts are printed when the work is done, ahead of that.
-
 **A response goes to memory as a whole,** as anyhttp has no way of getting at it piece by piece with a
 GET yet. So only `--timeout-ms` limits how large one can get.
 
