@@ -20,7 +20,7 @@ It looks up the HTTPS records of each host in DNS ([RFC 9460](https://www.rfc-ed
 and requests `https://<host>/` once, over TLS, in the way that the records say. It prints the status,
 the route, the IP address it connected to, the time it took and the header fields of the response,
 along with the host's records. A redirect is reported and not followed, and nothing else on the host
-is requested.
+is requested. [Here is what that looks like](doc/sample-output.md).
 
 There is output for every host but those that do not exist, which `--all` adds. The counts at the end
 look like this, on stderr:
