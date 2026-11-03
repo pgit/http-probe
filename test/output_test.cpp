@@ -26,7 +26,8 @@ Result answered(int status = 200)
            .route = "h3 example.com:443",
            .fields = {{"server", "test"}},
            .body_size = 5,
-           .duration = 12ms};
+           .duration = 12ms,
+           .address = "192.0.2.1"};
 }
 
 } // namespace
@@ -34,9 +35,28 @@ Result answered(int status = 200)
 TEST(Output, SaysWhatCameBack)
 {
    EXPECT_EQ(format_result(answered(), false),
-             "example.com: 200 [h3 example.com:443] 5 bytes in 12ms\n"
+             "example.com: 200 [h3 example.com:443] at 192.0.2.1, 5 bytes in 12ms\n"
              "  record: HTTPS 1 . alpn=h3 ipv4hint=192.0.2.1 ipv6hint=2001:db8::1\n"
              "  server: test\n");
+}
+
+TEST(Output, SaysWhichAddressFailed)
+{
+   EXPECT_EQ(format_result({.host = "example.com",
+                            .outcome = Outcome::failed,
+                            .address = "2001:db8::1",
+                            .error = "[h3 example.com:443] timed out"},
+                           false),
+             "example.com: failed at 2001:db8::1: [h3 example.com:443] timed out\n");
+}
+
+TEST(Output, ColoursAnAddressByItsFamily)
+{
+   auto result = answered();
+   EXPECT_THAT(format_result(result, true), HasSubstr("at \x1b[35m192.0.2.1\x1b[0m,"));
+
+   result.address = "2001:db8::1";
+   EXPECT_THAT(format_result(result, true), HasSubstr("at \x1b[34m2001:db8::1\x1b[0m,"));
 }
 
 TEST(Output, SaysWhyThereIsNoResponse)
@@ -62,6 +82,19 @@ TEST(Output, ColoursTheWayCAresAsyncDoes)
    EXPECT_THAT(text, HasSubstr("\x1b[33mexample.com\x1b[0m:")) << "host names are yellow";
    EXPECT_THAT(text, HasSubstr("ipv4hint=\x1b[35m192.0.2.1\x1b[0m")) << "IPv4 is magenta";
    EXPECT_THAT(text, HasSubstr("ipv6hint=\x1b[34m2001:db8::1\x1b[0m")) << "IPv6 is blue";
+}
+
+TEST(Output, LeavesTheCommasOfAnAddressListWithoutColour)
+{
+   auto result = answered();
+   result.records[0].params = {"ipv4hint=192.0.2.1,192.0.2.2", "ipv6hint=2001:db8::1,2001:db8::2"};
+
+   const auto text = format_result(result, true);
+   EXPECT_THAT(text, HasSubstr("ipv4hint=\x1b[35m192.0.2.1\x1b[0m,\x1b[35m192.0.2.2\x1b[0m"));
+   EXPECT_THAT(text, HasSubstr("ipv6hint=\x1b[34m2001:db8::1\x1b[0m,\x1b[34m2001:db8::2\x1b[0m"));
+
+   EXPECT_THAT(format_result(result, false),
+               HasSubstr("ipv4hint=192.0.2.1,192.0.2.2 ipv6hint=2001:db8::1,2001:db8::2"));
 }
 
 TEST(Output, ColoursATargetAsAHostName)

@@ -7,6 +7,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ip/udp.hpp>
 
@@ -533,6 +534,92 @@ TEST_F(Probe, DoesNotConnectToATargetOtherThanTheHost)
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach);
    EXPECT_THAT(notes(results[0]), HasSubstr("elsewhere.example.test"));
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, SaysWhichAddressAnswered)
+{
+   site.dns().add_https("localhost", 1, ".", {alpn_h3, port_param(site.port())});
+   site.dns().add_https("localhost", 2, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   ASSERT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_TRUE(boost::asio::ip::make_address(results[0].address).is_loopback())
+      << results[0].address;
+}
+
+TEST_F(Probe, SaysWhichAddressAnsweredOverTcp)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   ASSERT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_TRUE(boost::asio::ip::make_address(results[0].address).is_loopback())
+      << results[0].address;
+}
+
+//
+// No other resolver knows this name, so that getting as far as the certificate, which is not for
+// this name, is what it takes to know that the addresses came from the DNS server.
+//
+TEST_F(Probe, ConnectsToTheAddressInDnsAndSaysWhichOne)
+{
+   site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));
+   site.dns().add_address("site.example.test", "127.0.0.1");
+
+   probe(config({"site.example.test"}));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_EQ(results[0].address, "127.0.0.1");
+   EXPECT_THAT(results[0].error, HasSubstr("connect"));
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, ConnectsToAnIPv6AddressInDns)
+{
+   site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));
+   site.dns().add_address("site.example.test", "::1");
+
+   probe(config({"site.example.test"}));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_EQ(results[0].address, "::1");
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, TriesTheNextAddressWhenAConnectionFails)
+{
+   site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));
+   site.dns().add_address("site.example.test", "127.0.0.1");
+   site.dns().add_address("site.example.test", "::1");
+
+   probe(config({"site.example.test"}));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(notes(results[0]), HasSubstr("at 127.0.0.1"));
+   EXPECT_THAT(notes(results[0]), HasSubstr("at ::1"));
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, DoesNotConnectWithoutAnAddress)
+{
+   site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));
+
+   probe(config({"site.example.test"}));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+   EXPECT_THAT(results[0].address, IsEmpty());
+   EXPECT_THAT(notes(results[0]), HasSubstr("address lookup"));
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 

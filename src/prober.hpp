@@ -32,7 +32,8 @@ struct Config
    /// How many hosts to work on at the same time.
    std::size_t concurrency = 16;
 
-   /// How long the request may take on one route, from connecting to the end of the response.
+   /// How long the request may take on one route, from connecting to the end of the response,
+   /// including any addresses of the host that could not be connected to.
    std::chrono::milliseconds timeout{10000};
 
    /// The DNS servers to ask, as resolver::set_servers() takes them. Empty for those of the system.
@@ -79,13 +80,16 @@ struct Result
    std::size_t body_size = 0; ///< with \c answered
    std::chrono::milliseconds duration{}; ///< with \c answered: of the attempt that got through
 
+   /// The address that answered or, with \c failed, the last one contacted. Empty without one.
+   std::string address;
    std::string error; ///< with \c failed: what went wrong on the last route
    std::vector<std::string> notes; ///< records that could not be used, routes that did not work
 };
 
 /**
- * Looks up the HTTPS records of each of Config::hosts with the resolver of c-ares-async, and sends
- * one request to each host that can be connected to (see plan_routes()). A response is what comes
+ * Looks up the HTTPS records and the addresses of each of Config::hosts with the resolver of
+ * c-ares-async, and sends one request to each host that can be connected to (see plan_routes()),
+ * trying its addresses in the order they came in, on each route. A response is what comes
  * back, whatever its status: a redirect is reported and not followed, nothing in the body is looked
  * at, and nothing else on the host is requested. The next route is for a connection that did not
  * come about: once a request has gone out, that was it for this host, however it ended.
@@ -118,7 +122,9 @@ private:
    anyhttp::Task<void> work();
    anyhttp::Task<ServiceRecords> resolve_service(const std::string& host);
    anyhttp::Task<Result> probe(const std::string& host);
-   anyhttp::Task<Response> attempt(const Route& route, const std::string& host);
+   anyhttp::Task<Response> attempt(const Route& route, const std::string& host,
+                                   const anyhttp::TcpEndpoint& endpoint,
+                                   std::chrono::steady_clock::time_point deadline);
    anyhttp::Task<Response> exchange(anyhttp::client::Client& client, anyhttp::Session& session,
                                     bool& request_sent, boost::urls::url url);
 

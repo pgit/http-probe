@@ -235,52 +235,78 @@ anyhttp::Task<Result> Prober::probe(const std::string& host)
       co_return result;
    }
 
+   //
+   // Routes stay on the host's own name, see plan_routes(), so that this is good for all of them.
+   // Outside of any timeout, as with the records. Not having an address says nothing about the
+   // host, and no record says that it has to have one.
+   //
+   spdlog::debug("{}: asking for the addresses of '{}'", host, host);
+   const auto [lookup_ec, addresses] = co_await resolver_.resolve(host, "");
+   if (lookup_ec || addresses.empty())
+   {
+      result.outcome = Result::Outcome::lookup_failed;
+      result.notes.push_back(std::format("address lookup of '{}': {}", host,
+                                         lookup_ec ? lookup_ec.message() : "no addresses"));
+      co_return result;
+   }
+
    result.outcome = Result::Outcome::failed;
    for (const auto& route : plan.routes)
    {
-      spdlog::debug("{}: connecting by {}, for {}", host, route.to_string(), route.source);
-      auto response = co_await attempt(route, host);
-      if (response.ec)
+      const auto deadline = std::chrono::steady_clock::now() + config_.timeout;
+      for (auto endpoint : addresses)
       {
-         result.error = std::format("[{}] {}", route.to_string(), response.error);
-         result.notes.push_back(result.error);
-         spdlog::debug("{}: {}", host, result.error);
-         if (response.request_sent)
-            break; // the host may have seen it, and another route would make it two
-         continue;
-      }
+         endpoint.port(route.port);
+         result.address = endpoint.address().to_string();
+         spdlog::debug("{}: connecting to {} by {}, for {}", host, result.address,
+                       route.to_string(), route.source);
+         auto response = co_await attempt(route, host, endpoint, deadline);
+         if (response.ec)
+         {
+            result.error = std::format("[{}] {}", route.to_string(), response.error);
+            result.notes.push_back(std::format("{} at {}", result.error, result.address));
+            spdlog::debug("{}: {} at {}", host, result.error, result.address);
+            if (response.request_sent)
+               co_return result; // the host may have seen it, and anything else would make it two
+            if (std::chrono::steady_clock::now() >= deadline)
+               break; // the next address gets what is left of the timeout, which is nothing
+            continue;
+         }
 
-      result.outcome = Result::Outcome::answered;
-      result.error.clear();
-      result.status = static_cast<int>(response.message.result_int());
-      auto spoken = route;
-      spoken.protocol = response.protocol;
-      result.route = spoken.to_string();
-      for (const auto& field : response.message)
-         result.fields.emplace_back(field.name_string(), field.value());
-      result.body_size = response.message.body().size();
-      result.duration = response.duration;
-      break;
+         result.outcome = Result::Outcome::answered;
+         result.error.clear();
+         result.status = static_cast<int>(response.message.result_int());
+         auto spoken = route;
+         spoken.protocol = response.protocol;
+         result.route = spoken.to_string();
+         for (const auto& field : response.message)
+            result.fields.emplace_back(field.name_string(), field.value());
+         result.body_size = response.message.body().size();
+         result.duration = response.duration;
+         co_return result;
+      }
    }
    co_return result;
 }
 
 //
-// Connects as the route says and asks for the host's root, within the timeout, and after that ends
-// the connection in an orderly way, which has limits of its own and is none of the timeout's
-// business: the response is there by then.
+// Connects as the route says, to this one address so that there is no doubt about which it was, and
+// asks for the host's root, by the deadline. After that it ends the connection in an orderly way,
+// which has limits of its own and is none of the timeout's business: the response is there by then.
 //
-anyhttp::Task<Prober::Response> Prober::attempt(const Route& route, const std::string& host)
+anyhttp::Task<Prober::Response> Prober::attempt(const Route& route, const std::string& host,
+                                                const anyhttp::TcpEndpoint& endpoint,
+                                                std::chrono::steady_clock::time_point deadline)
 {
    anyhttp::client::Config client_config;
    client_config.protocol = route.protocol;
    client_config.tls_ca_file = config_.tls_ca_file;
 
    //
-   // The name of the route, as that is also what anyhttp verifies the certificate against, which
-   // leaves it to its own resolver to look up the address. The scheme is what makes it TLS over
-   // TCP, too.
+   // The name of the route is what anyhttp verifies the certificate against, wherever the
+   // connection goes. The scheme is what makes it TLS over TCP, too.
    //
+   client_config.endpoints = {endpoint};
    client_config.url.set_scheme("https");
    client_config.url.set_host_address(route.host);
    client_config.url.set_port_number(route.port);
@@ -296,7 +322,7 @@ anyhttp::Task<Prober::Response> Prober::attempt(const Route& route, const std::s
    //
    auto result = co_await anyhttp::when_either(
       exchange(client, session, request_sent, boost::urls::url(std::format("https://{}/", host))),
-      anyhttp::delay(config_.timeout));
+      anyhttp::delay(std::chrono::ceil<std::chrono::milliseconds>(deadline - start)));
 
    auto* exchanged = std::get_if<0>(&result);
    if (!exchanged)

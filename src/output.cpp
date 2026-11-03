@@ -1,6 +1,7 @@
 #include "output.hpp"
 
 #include <format>
+#include <ranges>
 #include <string_view>
 
 namespace http_probe
@@ -36,6 +37,27 @@ std::string status_text(int status, bool color)
    return colored(std::to_string(status), code, color);
 }
 
+std::string address_text(std::string_view address, bool color)
+{
+   const bool v6 = address.find(':') != address.npos;
+   return colored(address, v6 ? color_of::v6 : color_of::v4, color);
+}
+
+//
+// The value of an address hint: the addresses have a colour, the commas between them do not.
+//
+std::string address_list_text(std::string_view list, bool color)
+{
+   std::string text;
+   for (const auto address : std::views::split(list, ','))
+   {
+      if (!text.empty())
+         text += ',';
+      text += address_text(std::string_view(address), color);
+   }
+   return text;
+}
+
 //
 // to_text() with colours: the target, and the values of the address hints.
 //
@@ -48,12 +70,11 @@ std::string record_text(const c_ares_async::https_record& record, bool color)
 
    for (std::string_view param : record.params)
    {
-      const bool v4 = param.starts_with("ipv4hint=");
-      if (v4 || param.starts_with("ipv6hint="))
+      if (param.starts_with("ipv4hint=") || param.starts_with("ipv6hint="))
       {
          const auto value = param.find('=') + 1;
          text += std::format(" {}{}", param.substr(0, value),
-                             colored(param.substr(value), v4 ? color_of::v4 : color_of::v6, color));
+                             address_list_text(param.substr(value), color));
       }
       else
          text += std::format(" {}", param);
@@ -74,12 +95,15 @@ std::string format_result(const Result& result, bool color)
    switch (result.outcome)
    {
    case Outcome::answered:
-      text = std::format("{}: {} [{}] {} bytes in {}\n", host, status_text(result.status, color),
-                         result.route, result.body_size, result.duration);
+      text = std::format("{}: {} [{}] at {}, {} bytes in {}\n", host,
+                         status_text(result.status, color), result.route,
+                         address_text(result.address, color), result.body_size, result.duration);
       break;
    case Outcome::failed:
-      text =
-         std::format("{}: {}: {}\n", host, colored("failed", color_of::bad, color), result.error);
+      text = std::format(
+         "{}: {}{}: {}\n", host, colored("failed", color_of::bad, color),
+         result.address.empty() ? "" : std::format(" at {}", address_text(result.address, color)),
+         result.error);
       break;
    case Outcome::out_of_reach:
       text = std::format("{}: {}\n", host, colored("out of reach", color_of::moved, color));

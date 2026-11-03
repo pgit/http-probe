@@ -1,8 +1,8 @@
 //
 // A web site with DNS of its own, all on loopback, for the program to be pointed at: an anyhttp
 // server on one port, for every protocol, and a DNS server with whatever zone the test wants. The
-// server has a certificate for "localhost", the one name that also resolves without our DNS server,
-// which anyhttp's own resolver needs.
+// server has a certificate for "localhost". That name comes from /etc/hosts and not from the DNS
+// server, which a test can only have the last word on with a name that the certificate is not for.
 //
 #pragma once
 
