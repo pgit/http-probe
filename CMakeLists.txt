@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.30)
-project(crawler VERSION 0.0.1 DESCRIPTION "A web crawler on anyhttp and c-ares-async" LANGUAGES C CXX)
+project(http_probe VERSION 0.0.1 DESCRIPTION "Requests hosts the way their HTTPS records say, on anyhttp and c-ares-async" LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED On)
@@ -20,10 +20,16 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
     add_link_options(-stdlib=libc++)
     list(PREPEND CMAKE_PREFIX_PATH /opt/libc++)
+    # As in anyhttp: the shared ones share their names with the libstdc++ ones in /usr/local/lib.
+    set(Boost_USE_STATIC_LIBS ON)
 endif()
 
-# I/O runtime: ASIO or COROSIO. COROSIO would have to declare the capy and corosio pins here, too.
-set(ANYHTTP_API ASIO)
+#
+# I/O runtime: Capy and Corosio, and only those. The libraries take either, which is their business:
+# this is a program, and it gets to decide. These shadow the cache entries of the libraries, which
+# go on saying ASIO in CMakeCache.txt.
+#
+set(ANYHTTP_API COROSIO)
 set(C_ARES_ASYNC_API ${ANYHTTP_API})
 
 #
@@ -36,28 +42,55 @@ set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
 # --------------------------------------------------------------------------------------------------
 
 #
-# Pinned to a commit, and moving a pin is a commit of its own. To build against a checkout instead
-# there is the 'dev' preset, which sets FETCHCONTENT_SOURCE_DIR_*. SYSTEM, so that the warnings of
-# this project do not apply to the headers of the libraries.
-#
-# anyhttp: the head of branch 'packaging', move this to master once that is merged
+# Pinned to a commit, and moving a pin is a commit of its own. SYSTEM, so that the warnings of this
+# project do not apply to the headers of the libraries.
 #
 include(FetchContent)
 FetchContent_Declare(anyhttp
     GIT_REPOSITORY https://github.com/pgit/anyhttp.git
-    GIT_TAG af39b5c71490978d545c1b47ee8e149f9a7082c9
+    GIT_TAG cc3faee4fb351a56bbca48db7cfcac7585e59e8b
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
-    GIT_TAG 2fb55f687f210d3da816e24aab9cefb61d6b4673
+    GIT_TAG 6d46c6c8e65231f23a250bcec5dd00b3a1d9ba34
     SYSTEM)
+
+#
+# Both libraries pin these as well, to the same commits for now. The first declaration wins, so these
+# are the ones both of them get, and here they are SYSTEM, too.
+#
+FetchContent_Declare(capy
+    GIT_REPOSITORY https://github.com/cppalliance/capy.git
+    GIT_TAG 24c54af2cf967ccbf8d3809af4bcd9c8f61f553b
+    EXCLUDE_FROM_ALL
+    SYSTEM)
+FetchContent_Declare(corosio
+    GIT_REPOSITORY https://github.com/cppalliance/corosio.git
+    GIT_TAG 41d0de18b6e4fa1b397c38a866f2daf52c6c36b5
+    EXCLUDE_FROM_ALL
+    SYSTEM)
+
 FetchContent_MakeAvailable(anyhttp c_ares_async)
+
+# Only for the command line. Neither library needs this component, so neither asks for it here.
+find_package(Boost 1.88 REQUIRED COMPONENTS program_options)
 
 # --------------------------------------------------------------------------------------------------
 
-add_executable(crawler src/main.cpp)
-target_link_libraries(crawler PRIVATE anyhttp::anyhttp c_ares_async::c_ares_async)
-target_compile_options(crawler PRIVATE -Wall -Wextra -Werror)
+#
+# The program in a library of its own, for the tests to link. The warnings are not for the sources
+# from c-ares-async that the tests borrow, see test/CMakeLists.txt.
+#
+set(http_probe_warnings -Wall -Wextra -Werror -Wno-missing-designated-field-initializers)
+
+add_library(http_probe_core STATIC src/output.cpp src/prober.cpp src/routes.cpp)
+target_include_directories(http_probe_core PUBLIC src)
+target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::c_ares_async)
+target_compile_options(http_probe_core PRIVATE ${http_probe_warnings})
+
+add_executable(http-probe src/main.cpp)
+target_link_libraries(http-probe PRIVATE http_probe_core Boost::program_options)
+target_compile_options(http-probe PRIVATE ${http_probe_warnings})
 
 enable_testing()
-add_test(NAME crawler_starts COMMAND crawler)
+add_subdirectory(test)

@@ -1,12 +1,15 @@
 {
     "words": [
+        "alpn",
         "anyhttp",
         "ASIO",
+        "capy",
         "cares",
         "corosio",
         "Eisenlohr",
         "psedoc",
-        "spdlog"
+        "spdlog",
+        "SVCB"
     ],
     "ignorePaths": [
         ".devcontainer/*",

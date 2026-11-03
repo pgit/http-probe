@@ -38,7 +38,7 @@
 				"testMate.cpp.test.parallelExecutionLimit": 20,
 				"testMate.cpp.test.advancedExecutables": [
 					{
-						"pattern": "${command:cmake.buildDirectory}/test/test_*",
+						"pattern": "${command:cmake.buildDirectory}/test/*_tests",
 						"cwd": "${workspaceDirectory}",
 						"runTask": {
 							"before": [
@@ -75,8 +75,6 @@
 
 	"mounts": [
 		"source=cpp-devcontainer-bashhistory,target=/commandhistory,type=volume",
-		"source=${localEnv:HOME}/src/anyhttp,target=/workspaces/anyhttp,type=bind,consistency=cached",
-		"source=${localEnv:HOME}/src/c-ares-async,target=/workspaces/c-ares-async,type=bind,consistency=cached",
 		"source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
 		"source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind,consistency=cached"
 	],
