@@ -13,6 +13,7 @@ Requests hosts the way their HTTPS records say, on [anyhttp](https://github.com/
 ```sh
 http-probe --dns-server 1.1.1.1 cloudflare.com
 http-probe --dns-server 1.1.1.1 --file hostnames.txt
+http-probe --dot --dns-server one.one.one.one cloudflare.com
 ```
 
 It looks up the HTTPS records of each host in DNS ([RFC 9460](https://www.rfc-editor.org/rfc/rfc9460)),
@@ -63,7 +64,17 @@ log, so `--concurrency 1` helps. Colours are for terminals only unless there is 
 anyhttp puts them into some of its log messages regardless.
 
 **Use `--dns-server`.** The resolver in the devcontainer answers with no data for HTTPS records, even
-where they exist, which looks just like no host having any.
+where they exist, which looks just like no host having any. It takes addresses and host names, with a
+port behind either. A name is looked up in the clear with the servers of the system, whatever the
+queries proper go out as, and only its first address becomes a server.
+
+**`--dot` asks over DNS over TLS** ([RFC 7858](https://www.rfc-editor.org/rfc/rfc7858)), on port 853
+unless the server says otherwise, for the records and the addresses alike. The certificate of the
+server needs a name to be checked against. That is the host name in `--dns-server`, and with an
+address, or several names, `--tls-hostname` has to give it. `--tls-no-verify` skips the check, which
+is for testing and has nothing to do with the certificates of the hosts. A failed handshake makes the
+hosts lookup failures, and says why in the log. `--ca-file` is for the hosts as well: the certificate
+of the DNS server goes by the trust store of OpenSSL, which `SSL_CERT_FILE` can change.
 
 **A response goes to memory as a whole,** as anyhttp has no way of getting at it piece by piece with a
 GET yet. So only `--timeout-ms` limits how large one can get.

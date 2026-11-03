@@ -71,6 +71,9 @@ public:
    /// How often the DNS server was asked about \p name, also after stop().
    std::size_t dns_queries(std::string_view name) const;
 
+   /// How many questions came in over \p via, also after stop().
+   std::size_t dns_queries(fake_dns_server::transport via) const;
+
    /// Everything the server was asked so far, in order, and all of the targets alone.
    const std::vector<Request>& requests() const { return *requests_; }
    std::vector<std::string> targets() const;

@@ -78,4 +78,13 @@ set_tests_properties(http_probe_refuses_an_unknown_option PROPERTIES
 
 add_test(NAME http_probe_describes_its_options COMMAND http-probe --help)
 set_tests_properties(http_probe_describes_its_options PROPERTIES
-    PASS_REGULAR_EXPRESSION "--dns-server ADDR")
+    PASS_REGULAR_EXPRESSION "--dns-server SERVER")
+
+add_test(NAME http_probe_refuses_dot_without_a_name COMMAND http-probe --dot localhost)
+set_tests_properties(http_probe_refuses_dot_without_a_name PROPERTIES
+    PASS_REGULAR_EXPRESSION "--dot needs a name")
+
+add_test(NAME http_probe_refuses_tls_options_without_dot
+         COMMAND http-probe --tls-no-verify localhost)
+set_tests_properties(http_probe_refuses_tls_options_without_dot PROPERTIES
+    PASS_REGULAR_EXPRESSION "only apply with --dot")

@@ -16,6 +16,8 @@
 #include <cctype>
 #include <exception>
 #include <format>
+#include <optional>
+#include <ranges>
 #include <set>
 #include <stdexcept>
 #include <tuple>
@@ -52,6 +54,85 @@ void log_to_spdlog(c_ares_async::log_level level, std::string_view message)
    case error:
       return spdlog::error("{}", message);
    }
+}
+
+// -------------------------------------------------------------------------------------------------
+
+//
+// The entries of a list of DNS servers.
+//
+std::vector<std::string_view> split_servers(std::string_view list)
+{
+   std::vector<std::string_view> servers;
+   for (const auto part : std::views::split(list, ','))
+   {
+      const std::string_view server(part);
+      if (const auto first = server.find_first_not_of(" \t"); first != server.npos)
+         servers.push_back(server.substr(first, server.find_last_not_of(" \t") - first + 1));
+   }
+   return servers;
+}
+
+//
+// A server given by name, and the port behind it, colon included, if there is one.
+//
+struct ServerName
+{
+   std::string_view name;
+   std::string_view port;
+};
+
+//
+// Tells the names in a list from what c-ares takes for a server, all of which is addresses:
+// "192.0.2.1", "192.0.2.1:5353", "[::1]:5353", "fe80::1%eth0" or a dns:// URI. Whatever is neither
+// goes to c-ares as well, for it to turn it down.
+//
+std::optional<ServerName> server_name(std::string_view server)
+{
+   const auto colon = server.find(':');
+   const auto name = server.substr(0, colon);
+   const auto port = colon == server.npos ? std::string_view{} : server.substr(colon);
+
+   const auto is_digit = [](unsigned char c) { return std::isdigit(c) != 0; };
+   if (!is_host_name(name) ||
+       (!port.empty() && (port.size() == 1 || !std::ranges::all_of(port.substr(1), is_digit))))
+      return std::nullopt;
+
+   return ServerName{name, port};
+}
+
+//
+// A certificate needs a name to be checked against. A single name in the list of servers is that
+// name, while an address is none, and of several names none is the one for all of them. Rather than
+// quietly talking to whoever answers, this says so.
+//
+c_ares_async::tls_options complete_dns_tls(c_ares_async::tls_options tls, std::string_view servers)
+{
+   if (!tls.enabled)
+   {
+      if (!tls.hostname.empty() || !tls.verify)
+         throw std::invalid_argument("--tls-hostname and --tls-no-verify only apply with --dot");
+      return tls;
+   }
+
+   if (!tls.hostname.empty())
+      return tls;
+
+   std::set<std::string_view> names;
+   for (const auto server : split_servers(servers))
+      if (const auto named = server_name(server))
+         names.insert(named->name);
+
+   if (names.size() == 1)
+      tls.hostname = *names.begin();
+   else if (tls.verify)
+      throw std::invalid_argument(std::format(
+         "{}, or --tls-no-verify to skip the check",
+         names.empty() ? "--dot needs a name to verify the certificate of the DNS "
+                         "server against: a host name as --dns-server, or --tls-hostname"
+                       : "--dns-server names several hosts, so --dot needs "
+                         "--tls-hostname to verify their certificates against"));
+   return tls;
 }
 
 // =================================================================================================
@@ -100,8 +181,7 @@ void prefer_ipv6(std::vector<corosio::endpoint>& addresses)
 }
 
 Prober::Prober(capy::any_executor executor, Config config, Observer observer)
-   : executor_(executor), config_(std::move(config)), observer_(std::move(observer)),
-     resolver_(executor)
+   : executor_(executor), config_(std::move(config)), observer_(std::move(observer))
 {
    if (config_.hosts.empty())
       throw std::invalid_argument("nothing to do: no host names given");
@@ -117,21 +197,73 @@ Prober::Prober(capy::any_executor executor, Config config, Observer observer)
          hosts_.push_back(std::move(name));
    }
 
-   resolver_.set_logger(&log_to_spdlog);
+   config_.dns_tls = complete_dns_tls(std::move(config_.dns_tls), config_.dns_server);
+}
 
-   if (!config_.dns_server.empty())
-      if (const auto ec = resolver_.set_servers(config_.dns_server))
-         throw std::invalid_argument(
-            std::format("invalid DNS server '{}': {}", config_.dns_server, ec.message()));
+//
+// c-ares takes addresses for its servers and nothing else, so a name has to be looked up before
+// there is anybody to ask, the regular way and in the clear, whatever the queries proper go out as.
+//
+// Only the first address of a name becomes a server. c-ares gives every query its tries once per
+// server, with the timeout doubling each time around, so all of them would not be failover for free
+// but make a host that nobody has an answer for take much longer.
+//
+capy::task<std::string> Prober::dns_server_addresses()
+{
+   std::unique_ptr<c_ares_async::resolver> resolver; // only if there is a name to look up at all
+   std::string addresses;
+
+   for (const auto server : split_servers(config_.dns_server))
+   {
+      std::string address(server);
+      if (const auto named = server_name(server))
+      {
+         if (!resolver)
+         {
+            resolver = std::make_unique<c_ares_async::resolver>(executor_);
+            resolver->set_logger(&log_to_spdlog);
+            if (!config_.dns_server_lookup.empty())
+               if (const auto ec = resolver->set_servers(config_.dns_server_lookup))
+                  throw std::invalid_argument(ec.message());
+         }
+
+         spdlog::debug("looking up DNS server '{}'", named->name);
+         const auto [ec, endpoints] = co_await resolver->resolve(std::string(named->name), "");
+         if (ec || endpoints.empty())
+            throw std::runtime_error(
+               std::format("DNS server '{}': {}", named->name, ec ? ec.message() : "no addresses"));
+
+         //
+         // An IPv6 address only needs its brackets if there is a port behind it.
+         //
+         const auto first = endpoints.front().address();
+         address = named->port.empty() ? first.to_string()
+                   : first.is_v6()     ? std::format("[{}]{}", first.to_string(), named->port)
+                                       : std::format("{}{}", first.to_string(), named->port);
+      }
+      addresses += (addresses.empty() ? "" : ",") + address;
+   }
+   co_return addresses;
 }
 
 capy::task<> Prober::run()
 {
+   const auto servers = co_await dns_server_addresses();
+
+   resolver_ = std::make_unique<c_ares_async::resolver>(executor_, config_.dns_tls);
+   resolver_->set_logger(&log_to_spdlog);
+   if (!servers.empty())
+      if (const auto ec = resolver_->set_servers(servers))
+         throw std::invalid_argument(
+            std::format("invalid DNS server '{}': {}", config_.dns_server, ec.message()));
+
    std::vector<capy::task<capy::results<>>> workers;
    for (std::size_t i = 0; i < std::min(config_.concurrency, hosts_.size()); ++i)
       workers.push_back(work());
 
    std::ignore = co_await capy::when_all(std::move(workers));
+
+   resolver_.reset();
 }
 
 capy::task<capy::results<>> Prober::work()
@@ -163,7 +295,7 @@ capy::task<ServiceRecords> Prober::resolve_service(const std::string& host)
       // GHSA-6wfj-rwm7-3542 is about. c-ares has timeouts of its own.
       //
       spdlog::debug("{}: asking for the HTTPS records of '{}'", host, found.owner);
-      auto [ec, records] = co_await resolver_.resolve_https(found.owner);
+      auto [ec, records] = co_await resolver_->resolve_https(found.owner);
       if (ec)
       {
          if (ec == c_ares_async::make_ares_error(ARES_ENOTFOUND))
@@ -245,7 +377,7 @@ capy::task<Result> Prober::probe(const std::string& host)
    // host, and no record says that it has to have one.
    //
    spdlog::debug("{}: asking for the addresses of '{}'", host, host);
-   auto [lookup_ec, addresses] = co_await resolver_.resolve(host, "");
+   auto [lookup_ec, addresses] = co_await resolver_->resolve(host, "");
    if (lookup_ec || addresses.empty())
    {
       result.outcome = Result::Outcome::lookup_failed;

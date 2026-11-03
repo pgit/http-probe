@@ -19,16 +19,24 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <ostream>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -110,7 +118,7 @@ protected:
       //
       const auto run = [&]() -> capy::task<> {
          co_await prober.run();
-         site.stop();
+         stop_sites();
       };
 
       std::exception_ptr failed;
@@ -148,9 +156,11 @@ protected:
    //
    void finish()
    {
-      site.stop();
+      stop_sites();
       context.run();
    }
+
+   virtual void stop_sites() { site.stop(); }
 
    static int quiet()
    {
@@ -1001,4 +1011,253 @@ TEST_F(Probe, H3OnlyDoesNotTakeAFailedLookupForNoHttp3)
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
    EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+// =================================================================================================
+// --dot
+// =================================================================================================
+
+namespace
+{
+
+const test_certificate& dns_certificate()
+{
+   static const auto certificate = make_test_certificate("dns.test");
+   return certificate;
+}
+
+class DnsOverTls : public Probe
+{
+protected:
+   void SetUp() override
+   {
+      site.dns().use_tls(dns_certificate());
+      site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+      site.page("/", {.body = "hello"});
+   }
+
+   void TearDown() override
+   {
+      ::unsetenv("SSL_CERT_FILE");
+      if (!trusted.empty())
+         std::filesystem::remove(trusted);
+   }
+
+   void stop_sites() override
+   {
+      site.stop();
+      names.stop();
+   }
+
+   //
+   // The resolver verifies against the default trust store, which is the one thing that it lets
+   // anybody say something about. --ca-file does not come into it.
+   //
+   void trust_the_dns_server()
+   {
+      trusted = std::filesystem::temp_directory_path() /
+                std::format("http-probe-test-dns-{}.pem", ::getpid());
+      std::ofstream(trusted) << dns_certificate().certificate_pem;
+      ASSERT_EQ(::setenv("SSL_CERT_FILE", trusted.c_str(), 1), 0);
+   }
+
+   Config config_over_tls(std::string hostname, bool verify = true)
+   {
+      auto configuration = config();
+      configuration.dns_tls = {.enabled = true, .hostname = std::move(hostname), .verify = verify};
+      return configuration;
+   }
+
+   /// A server of \p site, by the name that \ref names has for it.
+   Config config_by_name(const Site& server)
+   {
+      names.dns().add_address("dns.test", "127.0.0.1");
+
+      auto configuration = config();
+      const auto address = server.dns_address();
+      configuration.dns_server = "dns.test" + address.substr(address.rfind(':'));
+      configuration.dns_server_lookup = names.dns_address();
+      return configuration;
+   }
+
+   Site names{context.get_executor()}; // what the system's resolver is to a host name of a server
+   std::filesystem::path trusted;
+};
+
+} // namespace
+
+TEST_F(DnsOverTls, AsksOverTlsAndNothingElse)
+{
+   trust_the_dns_server();
+   probe(config_over_tls("dns.test"));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].status, 200);
+   EXPECT_GE(site.dns_queries(fake_dns_server::transport::tls), 1u);
+   EXPECT_EQ(site.dns_queries(fake_dns_server::transport::udp), 0u);
+   EXPECT_EQ(site.dns_queries(fake_dns_server::transport::tcp), 0u);
+}
+
+TEST_F(DnsOverTls, DoesNotConnectIfTheCertificateIsForAnotherName)
+{
+   trust_the_dns_server();
+   probe(config_over_tls("other.test"));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(DnsOverTls, DoesNotConnectIfTheCertificateIsNotTrusted)
+{
+   probe(config_over_tls("dns.test"));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(DnsOverTls, SkipsTheCheckIfToldTo)
+{
+   probe(config_over_tls("", false));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_GE(site.dns_queries(fake_dns_server::transport::tls), 1u);
+}
+
+TEST_F(DnsOverTls, StillVerifiesTheHostsWhenToldToSkipTheCheck)
+{
+   Site other(context.get_executor()); // has a certificate of its own
+
+   auto configuration = config_over_tls("", false);
+   configuration.tls_ca_file = other.ca_file().string();
+   other.stop();
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(DnsOverTls, TakesTheNameToVerifyFromTheDnsServer)
+{
+   trust_the_dns_server();
+
+   auto configuration = config_by_name(site);
+   configuration.dns_tls.enabled = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_GE(site.dns_queries(fake_dns_server::transport::tls), 1u);
+   EXPECT_EQ(names.dns_queries("dns.test"), names.dns_queries(fake_dns_server::transport::udp))
+      << "looking up the server is in the clear, and it is all that the other one was asked";
+   EXPECT_GE(names.dns_queries("dns.test"), 1u);
+}
+
+TEST_F(DnsOverTls, PrefersTheNameItIsGivenToTheOneOfTheDnsServer)
+{
+   trust_the_dns_server();
+
+   auto configuration = config_by_name(site);
+   configuration.dns_tls = {.enabled = true, .hostname = "other.test", .verify = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+}
+
+TEST_F(DnsOverTls, TakesADnsServerByNameWithoutDot)
+{
+   names.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   probe(config_by_name(names));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(site.dns_queries(fake_dns_server::transport::tls), 0u);
+}
+
+TEST_F(DnsOverTls, EndsTheRunIfADnsServerCanNotBeLookedUp)
+{
+   auto configuration = config();
+   configuration.dns_server = "missing.test";
+   configuration.dns_server_lookup = names.dns_address();
+
+   EXPECT_THROW(probe(std::move(configuration)), std::runtime_error);
+   EXPECT_THAT(results, IsEmpty());
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(DnsOverTls, RefusesAnAddressWithoutANameToVerify)
+{
+   EXPECT_THROW(probe(config_over_tls("")), std::invalid_argument);
+   finish();
+}
+
+TEST_F(DnsOverTls, RefusesSeveralNamesWithoutOneToVerify)
+{
+   auto configuration = config_over_tls("");
+   configuration.dns_server = "dns1.test,dns2.test";
+   EXPECT_THROW(probe(std::move(configuration)), std::invalid_argument);
+   finish();
+}
+
+TEST_F(DnsOverTls, RefusesToVerifyWithoutDot)
+{
+   auto configuration = config();
+   configuration.dns_tls.hostname = "dns.test";
+   EXPECT_THROW(probe(std::move(configuration)), std::invalid_argument);
+   finish();
+}
+
+TEST_F(Probe, RefusesADnsServerThatIsNoServer)
+{
+   auto configuration = config();
+   configuration.dns_server = "not a server";
+   EXPECT_THROW(probe(std::move(configuration)), std::invalid_argument);
+   finish();
+}
+
+//
+// The connection stays open for the next query and the server has no reason to close it, so the
+// program would never end if that was keeping the event loop going. This takes a context that has
+// nothing else to do, unlike the one of the others, and with that a server on a thread of its own,
+// which is only looked at when it is done.
+//
+TEST(DnsOverTlsConnection, DoesNotKeepTheProgramFromEnding)
+{
+   spdlog::set_level(spdlog::level::off);
+
+   corosio::io_context site_context;
+   Site site(site_context.get_executor());
+   site.dns().use_tls(dns_certificate());
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   std::size_t answered = 0;
+   {
+      std::jthread serving([&] { site_context.run(); });
+
+      corosio::io_context context;
+      Prober prober(
+         context.get_executor(),
+         {.hosts = {"localhost"},
+          .timeout = 1000ms,
+          .dns_server = site.dns_address(),
+          .dns_tls = {.enabled = true, .hostname = "", .verify = false},
+          .tls_ca_file = site.ca_file().string(),
+          .default_port = site.port()},
+         [&](const Result& result) { answered += result.outcome == Result::Outcome::answered; });
+      capy::run_async(context.get_executor())(prober.run());
+      context.run(); // what hangs if it does not end, for the timeout of the test to find
+
+      const auto stop = [](Site& site) -> capy::task<> {
+         site.stop();
+         co_return;
+      };
+      capy::run_async(site_context.get_executor())(stop(site));
+   }
+   EXPECT_EQ(answered, 1u);
 }

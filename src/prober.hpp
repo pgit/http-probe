@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <istream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -44,8 +45,18 @@ struct Config
    /// including any addresses of the host that could not be connected to.
    std::chrono::milliseconds timeout{10000};
 
-   /// The DNS servers to ask, as resolver::set_servers() takes them. Empty for those of the system.
+   /// The DNS servers to ask, comma separated: what resolver::set_servers() takes, or a host name
+   /// with or without a port. Empty for those of the system.
    std::string dns_server;
+
+   /// Whether to ask them over TLS (RFC 7858), and what to check their certificates against, in the
+   /// trust store of the TLS library, which tls_ca_file has no say in. A single host name in
+   /// dns_server goes without saying, as far as the name in here goes.
+   c_ares_async::tls_options dns_tls;
+
+   /// Who to look up the host names in dns_server with, always in the clear. Empty for the servers
+   /// of the system, and only tests have a use for anything else.
+   std::string dns_server_lookup;
 
    /// The CA certificates to verify servers against, as a PEM file. Empty for the system's.
    std::string tls_ca_file;
@@ -119,7 +130,8 @@ public:
    using Observer = std::function<void(const Result&)>;
 
    /// Throws \c std::invalid_argument for a configuration that is not good to go, and does nothing
-   /// else until run().
+   /// else until run(), which has more to say about the DNS servers: the same for a list that can't
+   /// be used, and \c std::runtime_error for a host name in it that can't be looked up.
    Prober(capy::any_executor executor, Config config, Observer observer);
 
    capy::task<> run();
@@ -134,6 +146,7 @@ private:
       std::chrono::milliseconds duration{};
    };
 
+   capy::task<std::string> dns_server_addresses();
    capy::task<capy::results<>> work();
    capy::task<ServiceRecords> resolve_service(const std::string& host);
    capy::task<Result> probe(const std::string& host);
@@ -149,7 +162,10 @@ private:
    Observer observer_;
    std::vector<std::string> hosts_;
    std::size_t next_host_ = 0;
-   c_ares_async::resolver resolver_;
+
+   /// For the duration of run(), as a connection for DNS over TLS stays open for as long as this is
+   /// around, and with that the event loop busy. By pointer, as there is no std::optional of it.
+   std::unique_ptr<c_ares_async::resolver> resolver_;
 };
 
 // =================================================================================================

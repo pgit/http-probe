@@ -155,6 +155,12 @@ std::size_t Site::dns_queries(std::string_view name) const
    });
 }
 
+std::size_t Site::dns_queries(fake_dns_server::transport via) const
+{
+   const auto& queries = dns_ ? dns_->queries() : queries_;
+   return std::ranges::count(queries, via, &fake_dns_server::query::via);
+}
+
 void Site::stop()
 {
    server_.reset();

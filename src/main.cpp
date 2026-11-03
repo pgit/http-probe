@@ -124,11 +124,24 @@ po::options_description describe_options(Arguments& arguments)
         "a host to request, the same as giving HOST by itself");
    opts("file", po::value(&arguments.files)->value_name("LIST"),
         "read the hosts from a file, one per line, as names or as URLs");
-   opts("dns-server", po::value(&config.dns_server)->value_name("ADDR"),
-        "the DNS server to ask, like 192.0.2.1 or 192.0.2.1:5353; default: the system's, which may "
-        "well not answer for HTTPS records");
+   opts("dns-server", po::value(&config.dns_server)->value_name("SERVER"),
+        "the DNS servers to ask, comma separated, by address or by name, like 192.0.2.1, "
+        "192.0.2.1:5353 or dns.example.com; default: the system's, which may well not answer for "
+        "HTTPS records");
+   opts("dot", po::bool_switch(&config.dns_tls.enabled),
+        "ask the DNS servers over TLS (RFC 7858), which moves them to port 853 unless they say "
+        "otherwise");
+   opts("tls-hostname", po::value(&config.dns_tls.hostname)->value_name("NAME"),
+        "with --dot, the name to use for SNI and to verify the certificate of the DNS server "
+        "against, like one.one.one.one; default: the host name in --dns-server");
+   opts("tls-no-verify", po::value<bool>()->zero_tokens()->notifier([&config](bool) {
+      config.dns_tls.verify = false;
+   }),
+        "with --dot, accept any certificate from the DNS server (testing only); does not apply to "
+        "the hosts");
    opts("ca-file", po::value(&config.tls_ca_file)->value_name("PEM"),
-        "the CA certificates to verify servers with; default: the system's");
+        "the CA certificates to verify the hosts with; default: the system's. Not for --dot, which "
+        "goes by the trust store of OpenSSL, as SSL_CERT_FILE can say");
    opts("concurrency",
         po::value<int>()
            ->value_name("N")
