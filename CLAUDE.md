@@ -3,7 +3,7 @@
 It requests `https://<host>/` once per host and reports what came back, connecting the way the
 host's HTTPS records say. It is built on two libraries of the same author, each in a repository of
 its own: anyhttp for HTTP and c-ares-async for DNS.
-[README.md](README.md) has the presets and the build commands.
+[README.md](README.md) has the build commands.
 
 ## Safety rules
 
@@ -32,10 +32,11 @@ any I/O, and [prober.cpp](src/prober.cpp) does the rest. The tests in [test/](te
 - Ask for a library change with an issue in that library's repository, using `gh`. Peter reviews the
   full text first, and the same goes for comments on issues and for closing them. The repositories
   are public, so reproduce on loopback and name no hosts from the lists.
-- Moving a pin in [CMakeLists.txt](CMakeLists.txt) is a commit of its own. CI builds from the pins
-  only, so a change here that needs a library change has to wait for that change to be pushed.
-- The `dev` preset builds the sibling checkouts as they are, on whatever branch they are on, and can
-  differ from the pins. Check with the `pinned` preset before committing.
+- Moving a pin in [CMakeLists.txt](CMakeLists.txt) is a commit of its own. Everything builds from
+  the pins, so a change here that needs a library change has to wait for that change to be pushed.
+- The libraries come from GitHub, as for any other user, and there are no checkouts of them to build
+  against. Other agents working on them do not interfere with this repository: nothing they do
+  arrives here until a pin moves. To read a library at its pin, look in `build/_deps/`.
 - Everything in one process has to agree on the standard library, the TLS library and the I/O
   runtime. [CMakeLists.txt](CMakeLists.txt) decides these for both libraries, so change them there.
   Do not configure a tree by hand: `cc` and `c++` are GCC on this host, and a tree without clang

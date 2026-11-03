@@ -72,12 +72,8 @@ prints the command to request it with:
 ## Build
 
 C++23 and CMake 3.30 or later. The devcontainer in [.devcontainer](.devcontainer) has the compilers
-and every dependency that the two libraries need. There are two presets:
-
-| Preset   | Tree            | Libraries come from                                             |
-|----------|-----------------|-----------------------------------------------------------------|
-| `dev`    | `build/`        | the checkouts next to this one, as they are                     |
-| `pinned` | `build-pinned/` | GitHub, at the commits pinned in [CMakeLists.txt](CMakeLists.txt); what CI builds |
+and every dependency that the two libraries need. The libraries themselves are fetched from GitHub,
+at the commits pinned in [CMakeLists.txt](CMakeLists.txt):
 
 ```sh
 cmake --preset pinned
@@ -85,4 +81,4 @@ cmake --build --preset pinned
 ctest --preset pinned
 ```
 
-Both presets use clang, libc++, OpenSSL and the Asio runtime.
+The tree is `build/`, with clang, libc++, OpenSSL and the Asio runtime.

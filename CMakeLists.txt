@@ -38,9 +38,8 @@ set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
 # --------------------------------------------------------------------------------------------------
 
 #
-# Pinned to a commit, and moving a pin is a commit of its own. To build against a checkout instead
-# there is the 'dev' preset, which sets FETCHCONTENT_SOURCE_DIR_*. SYSTEM, so that the warnings of
-# this project do not apply to the headers of the libraries.
+# Pinned to a commit, and moving a pin is a commit of its own. SYSTEM, so that the warnings of this
+# project do not apply to the headers of the libraries.
 #
 include(FetchContent)
 FetchContent_Declare(anyhttp
