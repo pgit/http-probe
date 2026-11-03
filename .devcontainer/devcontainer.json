@@ -38,7 +38,7 @@
 				"testMate.cpp.test.parallelExecutionLimit": 20,
 				"testMate.cpp.test.advancedExecutables": [
 					{
-						"pattern": "${command:cmake.buildDirectory}/test/test_*",
+						"pattern": "${command:cmake.buildDirectory}/test/*_tests",
 						"cwd": "${workspaceDirectory}",
 						"runTask": {
 							"before": [
