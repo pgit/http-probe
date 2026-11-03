@@ -48,7 +48,7 @@ FetchContent_Declare(anyhttp
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
-    GIT_TAG 2fb55f687f210d3da816e24aab9cefb61d6b4673
+    GIT_TAG 6d46c6c8e65231f23a250bcec5dd00b3a1d9ba34
     SYSTEM)
 FetchContent_MakeAvailable(anyhttp c_ares_async)
 
