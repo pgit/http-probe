@@ -58,10 +58,11 @@ c-ares sorts them, within the timeout of the route, until one of them can be con
 address that does not answer at all takes the whole timeout of the route, and IPv4 does not get a turn.
 A failure says which address it was on. Certificates are always verified, against the host's name.
 
-**To see what is going on,** `-v` logs to stderr: the requests and responses from anyhttp, the queries
-from c-ares and the steps in between. `-vv` adds all of QUIC. Hosts run at the same time mix in the
-log, so `--concurrency 1` helps. Colours are for terminals only unless there is `--color`, except that
-anyhttp puts them into some of its log messages regardless.
+**To see what is going on,** `-v` logs to stderr: the steps of the program and the queries from c-ares.
+`-vv` adds all that anyhttp has to say, QUIC included, with a line like `--- 42 ---` after each turn of
+the event loop, in red if it took 10 ms or more, to show which turn a log line belongs to. Hosts run at
+the same time mix in the log, so `--concurrency 1` helps. Colours are for terminals only unless there
+is `--color`, except that anyhttp puts them into some of its log messages regardless.
 
 **Use `--dns-server`.** The resolver in the devcontainer answers with no data for HTTPS records, even
 where they exist, which looks just like no host having any. It takes addresses and host names, with a

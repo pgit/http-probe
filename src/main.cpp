@@ -22,6 +22,7 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <print>
 #include <ranges>
 #include <stdexcept>
@@ -164,9 +165,9 @@ po::options_description describe_options(Arguments& arguments)
    opts("color", po::bool_switch(&arguments.color),
         "colour the output even where it does not go to a terminal, e.g. into 'less -R'");
    opts("verbose,v", po::value<std::vector<std::string>>()->zero_tokens()->composing(),
-        "log to stderr what is going on, the requests and responses of anyhttp and the queries of "
-        "c-ares among it; -vv for all of QUIC as well, which is a lot. To make sense of it, use "
-        "--concurrency 1.");
+        "log to stderr what is going on: the steps of this program and the queries of c-ares. -vv "
+        "adds all that anyhttp has to say, with a line after each turn of the event loop, which "
+        "is a lot. To make sense of it, use --concurrency 1.");
    return desc;
 }
 
@@ -219,17 +220,51 @@ void parse_arguments(int argc, char* argv[], const po::options_description& opti
 }
 
 //
-// Everywhere that anyhttp and c-ares log to, as both use the default logger. On stderr, so that the
-// results can go somewhere by themselves.
+// Sets up the two loggers, on stderr so that the results can go somewhere by themselves, and
+// returns the one for this program and c-ares. The default logger is left to anyhttp, which uses
+// nothing else, and that gets it a level of its own.
 //
-void set_up_logging(int verbosity, bool color)
+std::shared_ptr<spdlog::logger> set_up_logging(int verbosity, bool color)
 {
-   spdlog::set_default_logger(spdlog::stderr_color_mt(
-      "http-probe", color ? spdlog::color_mode::always : spdlog::color_mode::automatic));
-   spdlog::set_pattern("%H:%M:%S.%e %^%l%$ %v");
-   spdlog::set_level(verbosity >= 2   ? spdlog::level::trace
-                     : verbosity == 1 ? spdlog::level::debug
-                                      : spdlog::level::err);
+   const auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>(
+      color ? spdlog::color_mode::always : spdlog::color_mode::automatic);
+   sink->set_pattern("%H:%M:%S.%e %^%l%$ %v");
+
+   const auto anyhttp = std::make_shared<spdlog::logger>("anyhttp", sink);
+   anyhttp->set_level(verbosity >= 2 ? spdlog::level::trace : spdlog::level::err);
+   spdlog::set_default_logger(anyhttp);
+
+   auto own = std::make_shared<spdlog::logger>("http-probe", sink);
+   own->set_level(verbosity >= 1 ? spdlog::level::debug : spdlog::level::err);
+   return own;
+}
+
+//
+// Runs the context until it is out of work, one handler at a time, with a line after each, in red
+// when it took 10 ms or more. That shows which turn of the event loop a log line belongs to. The
+// lines are those of run() in anyhttp/utils.hpp, which prints them to stdout: here, they go with
+// the log and stay out of the results.
+//
+std::size_t run_with_separators(boost::corosio::io_context& context, bool color)
+{
+   using namespace std::chrono;
+
+   std::size_t i = 0;
+   auto t0 = steady_clock::now();
+   for (; context.run_one(); ++i)
+   {
+      const auto t1 = steady_clock::now();
+      const auto dt = duration_cast<milliseconds>(t1 - t0);
+      t0 = t1;
+      // clang-format off
+      if (dt < 10ms)
+         std::println(stderr, "--- {} ------------------------------------------------------------------------", i);
+      else
+         std::println(stderr, "{}--- {} ({}) ----------------------------------------------------------------{}",
+                      color ? "\x1b[1;31m" : "", i, dt, color ? "\x1b[0m" : "");
+      // clang-format on
+   }
+   return i;
 }
 
 } // namespace
@@ -254,11 +289,11 @@ int main(int argc, char* argv[])
       }
 
       auto& [config, files, help, all, color, verbosity] = arguments;
-      set_up_logging(verbosity, color);
+      config.logger = set_up_logging(verbosity, color);
 
       const bool own_dns_server = !config.dns_server.empty();
       const bool color_results = color || isatty(STDOUT_FILENO);
-      const bool color_summary = color || isatty(STDERR_FILENO);
+      const bool color_log = color || isatty(STDERR_FILENO);
 
       const auto report = [&](const http_probe::Result& result) {
          ++counts[result.outcome];
@@ -284,11 +319,14 @@ int main(int argc, char* argv[])
             failed = ex;
             context.stop();
          })(prober.run());
-      context.run();
+      if (verbosity >= 2)
+         run_with_separators(context, color_log);
+      else
+         context.run();
       if (failed)
          std::rethrow_exception(failed);
 
-      std::println(stderr, "{}", http_probe::format_summary(counts, color_summary));
+      std::println(stderr, "{}", http_probe::format_summary(counts, color_log));
       if (with_records == 0 && !own_dns_server)
          std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
                               "resolver answers for them, so try --dns-server.");

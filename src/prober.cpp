@@ -37,23 +37,24 @@ constexpr std::string_view user_agent = "http-probe/0.0.1 (+https://github.com/p
 constexpr int max_alias_chain = 8;
 
 //
-// The resolver does not write anywhere by itself. Its messages go where those of anyhttp go, which
-// is the default logger of spdlog.
+// The resolver does not write anywhere by itself. Its messages go where our own go.
 //
-void log_to_spdlog(c_ares_async::log_level level, std::string_view message)
+c_ares_async::log_function resolver_log(std::shared_ptr<spdlog::logger> logger)
 {
-   using enum c_ares_async::log_level;
-   switch (level)
-   {
-   case debug:
-      return spdlog::debug("{}", message);
-   case info:
-      return spdlog::info("{}", message);
-   case warning:
-      return spdlog::warn("{}", message);
-   case error:
-      return spdlog::error("{}", message);
-   }
+   return [logger = std::move(logger)](c_ares_async::log_level level, std::string_view message) {
+      using enum c_ares_async::log_level;
+      switch (level)
+      {
+      case debug:
+         return logger->debug("{}", message);
+      case info:
+         return logger->info("{}", message);
+      case warning:
+         return logger->warn("{}", message);
+      case error:
+         return logger->error("{}", message);
+      }
+   };
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -221,13 +222,13 @@ capy::task<std::string> Prober::dns_server_addresses()
          if (!resolver)
          {
             resolver = std::make_unique<c_ares_async::resolver>(executor_);
-            resolver->set_logger(&log_to_spdlog);
+            resolver->set_logger(resolver_log(config_.logger));
             if (!config_.dns_server_lookup.empty())
                if (const auto ec = resolver->set_servers(config_.dns_server_lookup))
                   throw std::invalid_argument(ec.message());
          }
 
-         spdlog::debug("looking up DNS server '{}'", named->name);
+         config_.logger->debug("looking up DNS server '{}'", named->name);
          const auto [ec, endpoints] = co_await resolver->resolve(std::string(named->name), "");
          if (ec || endpoints.empty())
             throw std::runtime_error(
@@ -251,7 +252,7 @@ capy::task<> Prober::run()
    const auto servers = co_await dns_server_addresses();
 
    resolver_ = std::make_unique<c_ares_async::resolver>(executor_, config_.dns_tls);
-   resolver_->set_logger(&log_to_spdlog);
+   resolver_->set_logger(resolver_log(config_.logger));
    if (!servers.empty())
       if (const auto ec = resolver_->set_servers(servers))
          throw std::invalid_argument(
@@ -294,7 +295,7 @@ capy::task<ServiceRecords> Prober::resolve_service(const std::string& host)
       // Outside of any timeout: the image has c-ares 1.34.5, and cancelling a lookup is what
       // GHSA-6wfj-rwm7-3542 is about. c-ares has timeouts of its own.
       //
-      spdlog::debug("{}: asking for the HTTPS records of '{}'", host, found.owner);
+      config_.logger->debug("{}: asking for the HTTPS records of '{}'", host, found.owner);
       auto [ec, records] = co_await resolver_->resolve_https(found.owner);
       if (ec)
       {
@@ -354,11 +355,11 @@ capy::task<Result> Prober::probe(const std::string& host)
    const auto plan = plan_routes(host, found, config_.default_port);
    result.notes = plan.rejected;
    for (const auto& rejected : plan.rejected)
-      spdlog::debug("{}: rejected: {}", host, rejected);
+      config_.logger->debug("{}: rejected: {}", host, rejected);
 
    if (config_.h3_only && !found.lookup_failed && !found.not_found && !has_h3_record(found))
    {
-      spdlog::debug("{}: left out, no record offers HTTP/3", host);
+      config_.logger->debug("{}: left out, no record offers HTTP/3", host);
       result.outcome = Result::Outcome::no_h3;
       co_return result;
    }
@@ -376,7 +377,7 @@ capy::task<Result> Prober::probe(const std::string& host)
    // Outside of any timeout, as with the records. Not having an address says nothing about the
    // host, and no record says that it has to have one.
    //
-   spdlog::debug("{}: asking for the addresses of '{}'", host, host);
+   config_.logger->debug("{}: asking for the addresses of '{}'", host, host);
    auto [lookup_ec, addresses] = co_await resolver_->resolve(host, "");
    if (lookup_ec || addresses.empty())
    {
@@ -400,14 +401,14 @@ capy::task<Result> Prober::probe(const std::string& host)
       {
          const corosio::endpoint endpoint(address, route.port);
          result.address = endpoint.address().to_string();
-         spdlog::debug("{}: connecting to {} by {}, for {}", host, result.address,
-                       route.to_string(), route.source);
+         config_.logger->debug("{}: connecting to {} by {}, for {}", host, result.address,
+                               route.to_string(), route.source);
          auto [ec, response] = co_await attempt(route, host, endpoint, deadline);
          if (ec)
          {
             result.error = std::format("[{}] {}", route.to_string(), response.error);
             result.notes.push_back(std::format("{} at {}", result.error, result.address));
-            spdlog::debug("{}: {} at {}", host, result.error, result.address);
+            config_.logger->debug("{}: {} at {}", host, result.error, result.address);
             if (response.request_sent)
                co_return result; // the host may have seen it, and anything else would make it two
             if (std::chrono::steady_clock::now() >= deadline)
@@ -478,7 +479,7 @@ Prober::attempt(const Route& route, const std::string& host, const corosio::endp
 
    if (!ec)
       if (auto [shutdown_ec] = co_await session.shutdown(); shutdown_ec)
-         spdlog::debug("{}: shutdown: {}", host, shutdown_ec.message());
+         config_.logger->debug("{}: shutdown: {}", host, shutdown_ec.message());
 
    co_return {ec, std::move(response)};
 }

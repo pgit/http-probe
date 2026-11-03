@@ -14,6 +14,8 @@
 #include <boost/capy/task.hpp>
 #include <boost/corosio/endpoint.hpp>
 
+#include <spdlog/spdlog.h>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -67,6 +69,10 @@ struct Config
    /// Connect only to the hosts with a record that offers HTTP/3, see has_h3_record(). Those are
    /// treated as usual, which includes going over TCP if HTTP/3 can not be connected to.
    bool h3_only = false;
+
+   /// Where the messages of this program and of c-ares go. anyhttp can't be told: it always uses
+   /// the default logger of spdlog, so a logger other than that one can have a level of its own.
+   std::shared_ptr<spdlog::logger> logger = spdlog::default_logger();
 };
 
 /// Whether \p host is a name and nothing but a name: no URL, port, path or wildcard, and not an

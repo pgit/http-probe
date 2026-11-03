@@ -88,3 +88,18 @@ add_test(NAME http_probe_refuses_tls_options_without_dot
          COMMAND http-probe --tls-no-verify localhost)
 set_tests_properties(http_probe_refuses_tls_options_without_dot PROPERTIES
     PASS_REGULAR_EXPRESSION "only apply with --dot")
+
+#
+# The levels of logging, as far as they show without a connection: the lookups fail on a port of
+# loopback that nothing listens on, so this needs nothing but the program.
+#
+add_test(NAME http_probe_logs_its_steps_with_v
+         COMMAND http-probe -v --dns-server 127.0.0.1:1 localhost)
+set_tests_properties(http_probe_logs_its_steps_with_v PROPERTIES
+    PASS_REGULAR_EXPRESSION "asking for the HTTPS records"
+    FAIL_REGULAR_EXPRESSION "--- 0 ---")
+
+add_test(NAME http_probe_shows_the_turns_of_the_event_loop_with_vv
+         COMMAND http-probe -vv --dns-server 127.0.0.1:1 localhost)
+set_tests_properties(http_probe_shows_the_turns_of_the_event_loop_with_vv PROPERTIES
+    PASS_REGULAR_EXPRESSION "--- 0 ---")

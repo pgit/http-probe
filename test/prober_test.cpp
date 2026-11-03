@@ -47,6 +47,7 @@ using testing::Contains;
 using testing::ElementsAre;
 using testing::HasSubstr;
 using testing::IsEmpty;
+using testing::Not;
 using testing::Pair;
 
 namespace boost::corosio
@@ -813,7 +814,7 @@ TEST_F(Probe, TakesAHostsWordForItThatTheServiceIsNotAvailable)
 TEST_F(Probe, LogsTheHttpAndTheLookupsAtDebugLevel)
 {
    //
-   // What -v is for. The wording is up to the libraries, so this is only about it being there.
+   // What -vv is for. The wording is up to the libraries, so this is only about it being there.
    //
    std::ostringstream log;
    const auto previous = spdlog::default_logger();
@@ -834,6 +835,40 @@ TEST_F(Probe, LogsTheHttpAndTheLookupsAtDebugLevel)
    EXPECT_THAT(log.str(), HasSubstr("asking for the HTTPS records of 'localhost'")) << "our own";
    EXPECT_THAT(log.str(), HasSubstr("GET https://localhost/")) << "anyhttp's request";
    EXPECT_THAT(log.str(), HasSubstr("content-type")) << "anyhttp's response";
+}
+
+TEST_F(Probe, KeepsAnyhttpOutOfALoggerOfItsOwn)
+{
+   //
+   // What sets -v apart from -vv: anyhttp sticks to the default logger, and everything else goes to
+   // the one in the configuration.
+   //
+   std::ostringstream library_log;
+   const auto previous = spdlog::default_logger();
+   spdlog::set_default_logger(std::make_shared<spdlog::logger>(
+      "test", std::make_shared<spdlog::sinks::ostream_sink_mt>(library_log)));
+   spdlog::set_level(spdlog::level::debug);
+
+   std::ostringstream own_log;
+   auto configuration = config();
+   configuration.logger = std::make_shared<spdlog::logger>(
+      "own", std::make_shared<spdlog::sinks::ostream_sink_mt>(own_log));
+   configuration.logger->set_level(spdlog::level::debug);
+
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+   probe(std::move(configuration));
+
+   spdlog::set_default_logger(previous);
+   quiet();
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200);
+
+   EXPECT_THAT(own_log.str(), HasSubstr("asking for the HTTPS records of 'localhost'"));
+   EXPECT_THAT(own_log.str(), Not(HasSubstr("GET https://localhost/")));
+   EXPECT_THAT(library_log.str(), HasSubstr("GET https://localhost/"));
+   EXPECT_THAT(library_log.str(), Not(HasSubstr("asking for the HTTPS records")));
 }
 
 // =================================================================================================
