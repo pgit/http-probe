@@ -117,10 +117,15 @@ std::string format_result(const Result& result, bool color)
    case Outcome::no_h3:
       text = std::format("{}: no h3 record\n", host);
       break;
+   case Outcome::resolved:
+      text = std::format("{}: {}\n", host, colored("resolved", color_of::good, color));
+      break;
    }
 
    for (const auto& record : result.records)
       text += std::format("  record: {}\n", record_text(record, color));
+   for (const auto& address : result.addresses)
+      text += std::format("  address: {}\n", address_text(address, color));
    for (const auto& note : result.notes)
       text += colored(std::format("  note: {}", note), color_of::note, color) + "\n";
    for (const auto& [name, value] : result.fields)
@@ -137,11 +142,14 @@ std::string format_summary(Counts counts, bool color)
       return counts[outcome] ? colored(line, code, color) : line;
    };
    return std::format(
-      "{}, {}, {}, {} not found, {}{}", count(Outcome::answered, "answered", color_of::good),
+      "{}, {}, {}, {} not found, {}{}{}", count(Outcome::answered, "answered", color_of::good),
       count(Outcome::failed, "failed", color_of::bad),
       count(Outcome::out_of_reach, "out of reach", color_of::moved), counts[Outcome::not_found],
       count(Outcome::lookup_failed, "lookups failed", color_of::bad),
-      counts[Outcome::no_h3] ? std::format(", {} without h3", counts[Outcome::no_h3]) : "");
+      counts[Outcome::no_h3] ? std::format(", {} without h3", counts[Outcome::no_h3]) : "",
+      counts[Outcome::resolved]
+         ? std::format(", {}", count(Outcome::resolved, "resolved", color_of::good))
+         : "");
 }
 
 // =================================================================================================

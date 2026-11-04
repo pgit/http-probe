@@ -89,6 +89,11 @@ add_test(NAME http_probe_refuses_tls_options_without_dot
 set_tests_properties(http_probe_refuses_tls_options_without_dot PROPERTIES
     PASS_REGULAR_EXPRESSION "only apply with --dot")
 
+add_test(NAME http_probe_takes_dns_only
+         COMMAND http-probe --dns-only --dns-server 127.0.0.1:1 localhost)
+set_tests_properties(http_probe_takes_dns_only PROPERTIES
+    PASS_REGULAR_EXPRESSION "1 lookups failed")
+
 #
 # The levels of logging, as far as they show without a connection: the lookups fail on a port of
 # loopback that nothing listens on, so this needs nothing but the program.

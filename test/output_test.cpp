@@ -88,6 +88,32 @@ TEST(Output, CountsTheHostsLeftOutOnlyIfThereAreAny)
    EXPECT_THAT(format_summary({{Outcome::answered, 3}}, false), Not(HasSubstr("h3")));
 }
 
+TEST(Output, ListsTheAddressesOfAHostThatWasOnlyLookedUp)
+{
+   const Result result{.host = "example.com",
+                       .outcome = Outcome::resolved,
+                       .records = {{.priority = 1, .target = ".", .params = {"alpn=h3"}}},
+                       .addresses = {"2001:db8::1", "192.0.2.1"}};
+
+   EXPECT_EQ(format_result(result, false), "example.com: resolved\n"
+                                           "  record: HTTPS 1 . alpn=h3\n"
+                                           "  address: 2001:db8::1\n"
+                                           "  address: 192.0.2.1\n");
+
+   const auto text = format_result(result, true);
+   EXPECT_THAT(text, HasSubstr("\x1b[32mresolved\x1b[0m"));
+   EXPECT_THAT(text, HasSubstr("address: \x1b[34m2001:db8::1\x1b[0m"));
+   EXPECT_THAT(text, HasSubstr("address: \x1b[35m192.0.2.1\x1b[0m"));
+}
+
+TEST(Output, CountsTheHostsOnlyLookedUpOnlyIfThereAreAny)
+{
+   EXPECT_EQ(format_summary({{Outcome::resolved, 3}, {Outcome::no_h3, 5}}, false),
+             "0 answered, 0 failed, 0 out of reach, 0 not found, 0 lookups failed, 5 without h3, "
+             "3 resolved");
+   EXPECT_THAT(format_summary({{Outcome::answered, 3}}, false), Not(HasSubstr("resolved")));
+}
+
 TEST(Output, ColoursTheWayCAresAsyncDoes)
 {
    const auto text = format_result(answered(), true);

@@ -1049,6 +1049,123 @@ TEST_F(Probe, H3OnlyDoesNotTakeAFailedLookupForNoHttp3)
 }
 
 // =================================================================================================
+// --dns-only
+// =================================================================================================
+
+TEST_F(Probe, DnsOnlyReportsTheRecordsAndTheAddressesInTheOrderOfTrying)
+{
+   site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));
+   site.dns().add_address("site.example.test", "127.0.0.1");
+   site.dns().add_address("site.example.test", "::1");
+
+   auto configuration = config({"site.example.test"});
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::resolved) << notes(results[0]);
+   EXPECT_EQ(results[0].records.size(), 1u);
+   EXPECT_THAT(results[0].addresses, ElementsAre("::1", "127.0.0.1"));
+   EXPECT_THAT(results[0].address, IsEmpty()) << "that is for what was contacted";
+}
+
+TEST_F(Probe, DnsOnlyDoesNotRequestAHostThatWouldAnswer)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::resolved) << notes(results[0]);
+   EXPECT_THAT(results[0].addresses, Not(IsEmpty()));
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, DnsOnlyDoesNotRequestAHostWithoutARecord)
+{
+   site.dns().add_address("localhost", "127.0.0.1");
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::resolved) << notes(results[0]);
+   EXPECT_THAT(results[0].records, IsEmpty());
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, DnsOnlyStillSaysThatARecordLeadsElsewhere)
+{
+   site.dns().add_https("localhost", 1, "elsewhere.example.test", h3_at(site.port()));
+
+   auto configuration = config();
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach);
+}
+
+TEST_F(Probe, DnsOnlyStillSaysThatANameDoesNotExist)
+{
+   auto configuration = config({"nowhere.example.test"});
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::not_found);
+}
+
+TEST_F(Probe, DnsOnlyStillSaysThatALookupFailed)
+{
+   site.dns().set_rcode(ARES_RCODE_SERVFAIL);
+
+   auto configuration = config();
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+}
+
+TEST_F(Probe, DnsOnlyStillSaysThatThereIsNoAddress)
+{
+   site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));
+
+   auto configuration = config({"site.example.test"});
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+   EXPECT_THAT(notes(results[0]), HasSubstr("address lookup"));
+}
+
+TEST_F(Probe, DnsOnlyGoesWithH3Only)
+{
+   site.dns().add_https("offers.example.test", 1, ".", h3_at(site.port()));
+   site.dns().add_address("offers.example.test", "127.0.0.1");
+   site.dns().add_https("lacks.example.test", 1, ".", h2_at(site.port()));
+   site.dns().add_address("lacks.example.test", "127.0.0.1");
+
+   auto configuration = config({"offers.example.test", "lacks.example.test"});
+   configuration.dns_only = true;
+   configuration.h3_only = true;
+   configuration.concurrency = 1;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 2u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::resolved) << notes(results[0]);
+   EXPECT_EQ(results[1].outcome, Result::Outcome::no_h3);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+// =================================================================================================
 // --dot
 // =================================================================================================
 

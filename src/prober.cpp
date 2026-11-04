@@ -393,6 +393,14 @@ capy::task<Result> Prober::probe(const std::string& host)
    //
    prefer_ipv6(addresses);
 
+   if (config_.dns_only)
+   {
+      result.outcome = Result::Outcome::resolved;
+      for (const auto& address : addresses)
+         result.addresses.push_back(address.address().to_string());
+      co_return result;
+   }
+
    result.outcome = Result::Outcome::failed;
    for (const auto& route : plan.routes)
    {
