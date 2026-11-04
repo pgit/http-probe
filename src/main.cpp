@@ -163,6 +163,9 @@ po::options_description describe_options(Arguments& arguments)
    opts("dns-only", po::bool_switch(&config.dns_only),
         "connect to nothing: stop after the lookups, and print the records and the addresses of "
         "each host");
+   opts("each-address", po::bool_switch(&config.each_address),
+        "send a request to each address of a host and print the status line of each, instead of "
+        "one request per host");
    opts("all", po::bool_switch(&arguments.all),
         "also print the hosts that do not exist, and those that --h3 leaves out");
    opts("color", po::bool_switch(&arguments.color),

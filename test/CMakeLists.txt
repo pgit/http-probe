@@ -94,6 +94,17 @@ add_test(NAME http_probe_takes_dns_only
 set_tests_properties(http_probe_takes_dns_only PROPERTIES
     PASS_REGULAR_EXPRESSION "1 lookups failed")
 
+add_test(NAME http_probe_refuses_each_address_with_dns_only
+         COMMAND http-probe --each-address --dns-only localhost)
+set_tests_properties(http_probe_refuses_each_address_with_dns_only PROPERTIES
+    PASS_REGULAR_EXPRESSION "rules out --each-address")
+
+# An empty list gets as far as having no hosts, and goes nowhere.
+add_test(NAME http_probe_takes_each_address_with_a_list
+         COMMAND http-probe --each-address --file /dev/null)
+set_tests_properties(http_probe_takes_each_address_with_a_list PROPERTIES
+    PASS_REGULAR_EXPRESSION "no host names given")
+
 #
 # The levels of logging, as far as they show without a connection: the lookups fail on a port of
 # loopback that nothing listens on, so this needs nothing but the program.

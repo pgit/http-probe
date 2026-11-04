@@ -1166,6 +1166,177 @@ TEST_F(Probe, DnsOnlyGoesWithH3Only)
 }
 
 // =================================================================================================
+// --each-address
+// =================================================================================================
+
+//
+// "localhost" is the one name the certificate is good for, and its addresses are up to /etc/hosts.
+// The server listens on all of them, however many that is.
+//
+TEST_F(Probe, EachAddressSendsOneRequestToEachOfThem)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   ASSERT_THAT(results[0].replies, Not(IsEmpty()));
+   for (const auto& reply : results[0].replies)
+   {
+      EXPECT_THAT(reply.address, Not(IsEmpty()));
+      EXPECT_EQ(reply.status, 200);
+      EXPECT_EQ(reply.reason, "OK");
+      EXPECT_THAT(reply.error, IsEmpty());
+   }
+   EXPECT_EQ(site.requests().size(), results[0].replies.size());
+}
+
+TEST_F(Probe, EachAddressGoesOverHttp3)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   ASSERT_THAT(results[0].replies, Not(IsEmpty()));
+   EXPECT_EQ(results[0].replies[0].reason, "OK");
+   EXPECT_EQ(site.requests().size(), results[0].replies.size());
+}
+
+TEST_F(Probe, EachAddressGoesOverHttp1)
+{
+   site.dns().add_https("localhost", 1, ".", h1_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   ASSERT_THAT(results[0].replies, Not(IsEmpty()));
+   EXPECT_EQ(results[0].replies[0].reason, "OK");
+   EXPECT_EQ(site.requests().size(), results[0].replies.size());
+}
+
+TEST_F(Probe, EachAddressReportsARedirectAndDoesNotFollowIt)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.status = 301, .location = "/elsewhere"});
+   site.page("/elsewhere", {.body = "not to be seen"});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   ASSERT_THAT(results[0].replies, Not(IsEmpty()));
+   for (const auto& reply : results[0].replies)
+      EXPECT_EQ(reply.status, 301);
+   EXPECT_THAT(site.targets(), testing::Each("/"));
+   EXPECT_EQ(site.requests().size(), results[0].replies.size());
+}
+
+TEST_F(Probe, EachAddressGoesOnToTheNextOneAfterAFailure)
+{
+   //
+   // The certificate is not for this name, so that both of them fail at connecting, in order.
+   //
+   site.dns().add_https("site.example.test", 1, ".", h2_at(site.port()));
+   site.dns().add_address("site.example.test", "127.0.0.1");
+   site.dns().add_address("site.example.test", "::1");
+
+   auto configuration = config({"site.example.test"});
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   ASSERT_EQ(results[0].replies.size(), 2u);
+   EXPECT_EQ(results[0].replies[0].address, "::1");
+   EXPECT_EQ(results[0].replies[1].address, "127.0.0.1");
+   EXPECT_THAT(results[0].replies[0].error, HasSubstr("connect"));
+   EXPECT_THAT(results[0].replies[1].error, HasSubstr("connect"));
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, EachAddressTriesTheNextRouteOnlyForAConnectionThatFailed)
+{
+   std::uint16_t closed = 0;
+   {
+      auto acceptor = silent_tcp_acceptor();
+      closed = acceptor.local_endpoint().port();
+   }
+   site.dns().add_https("localhost", 1, ".", h2_at(closed));
+   site.dns().add_https("localhost", 2, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   ASSERT_THAT(results[0].replies, Not(IsEmpty()));
+   for (const auto& reply : results[0].replies)
+      EXPECT_EQ(reply.status, 200) << reply.error;
+   EXPECT_EQ(site.requests().size(), results[0].replies.size());
+}
+
+TEST_F(Probe, EachAddressTriesNoOtherRouteOnceARequestHasGoneOut)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.dns().add_https("localhost", 2, ".", h1_at(site.port()));
+   site.page("/", {.body = "too late", .delay = 400ms});
+
+   auto configuration = config();
+   configuration.timeout = 100ms;
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   ASSERT_THAT(results[0].replies, Not(IsEmpty()));
+   for (const auto& reply : results[0].replies)
+      EXPECT_THAT(reply.error, HasSubstr("timed out"));
+   EXPECT_EQ(site.requests().size(), results[0].replies.size());
+}
+
+TEST_F(Probe, EachAddressStillSaysThatARecordLeadsElsewhere)
+{
+   site.dns().add_https("localhost", 1, "elsewhere.example.test", h2_at(site.port()));
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach);
+   EXPECT_THAT(results[0].replies, IsEmpty());
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, EachAddressDoesNotGoWithDnsOnly)
+{
+   auto configuration = config();
+   configuration.each_address = true;
+   configuration.dns_only = true;
+
+   EXPECT_THROW(Prober(context.get_executor(), std::move(configuration), [](const Result&) {}),
+                std::invalid_argument);
+   finish();
+}
+
+// =================================================================================================
 // --dot
 // =================================================================================================
 

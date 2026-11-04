@@ -188,6 +188,8 @@ Prober::Prober(capy::any_executor executor, Config config, Observer observer)
       throw std::invalid_argument("nothing to do: no host names given");
    if (config_.concurrency == 0)
       throw std::invalid_argument("a concurrency of 0 would never get anywhere");
+   if (config_.dns_only && config_.each_address)
+      throw std::invalid_argument("--dns-only connects to nothing, which rules out --each-address");
 
    std::set<std::string> seen;
    for (const auto& host : config_.hosts)
@@ -401,6 +403,19 @@ capy::task<Result> Prober::probe(const std::string& host)
       co_return result;
    }
 
+   if (config_.each_address)
+   {
+      result.outcome = Result::Outcome::answered;
+      for (const auto& address : addresses)
+      {
+         auto reply = co_await ask_address(plan.routes, host, address, result.notes);
+         if (!reply.error.empty())
+            result.outcome = Result::Outcome::failed;
+         result.replies.push_back(std::move(reply));
+      }
+      co_return result;
+   }
+
    result.outcome = Result::Outcome::failed;
    for (const auto& route : plan.routes)
    {
@@ -438,6 +453,40 @@ capy::task<Result> Prober::probe(const std::string& host)
       }
    }
    co_return result;
+}
+
+//
+// One request to one address: the next route is for a connection that did not come about, and once
+// a request has gone out, that was it for this address, however it ended.
+//
+capy::task<AddressReply> Prober::ask_address(const std::vector<Route>& routes,
+                                             const std::string& host,
+                                             const corosio::endpoint& address,
+                                             std::vector<std::string>& notes)
+{
+   AddressReply reply{.address = address.address().to_string()};
+   for (const auto& route : routes)
+   {
+      config_.logger->debug("{}: connecting to {} by {}, for {}", host, reply.address,
+                            route.to_string(), route.source);
+      const auto deadline = std::chrono::steady_clock::now() + config_.timeout;
+      auto [ec, response] =
+         co_await attempt(route, host, corosio::endpoint(address, route.port), deadline);
+      if (!ec)
+      {
+         reply.status = static_cast<int>(response.message.result_int());
+         reply.reason = response.message.reason();
+         reply.error.clear();
+         co_return reply;
+      }
+
+      reply.error = std::format("[{}] {}", route.to_string(), response.error);
+      notes.push_back(std::format("{} at {}", reply.error, reply.address));
+      config_.logger->debug("{}: {} at {}", host, reply.error, reply.address);
+      if (response.request_sent)
+         co_return reply;
+   }
+   co_return reply;
 }
 
 //

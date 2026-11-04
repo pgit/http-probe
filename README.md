@@ -39,6 +39,7 @@ look like this, on stderr:
 | gets no answer from DNS, or has no address    | lookup failed, so there is no telling, not connected to |
 | has no record that offers `h3`, with `--h3`   | without h3, not connected to                |
 | could be connected to, with `--dns-only`      | resolved, not connected to                  |
+| could be connected to, with `--each-address`  | answered if all of its addresses did, otherwise failed |
 
 Aliases are followed, a record has to be compatible, and the lowest priority goes first. Within a
 record, HTTP/3 goes first, and then TCP on the same port: HTTP/2 if the record has `h2`, otherwise
@@ -64,6 +65,23 @@ example.com: resolved
 All other hosts get the outcome they always get, which leaves `answered` and `failed` at 0. The addresses
 are only looked up for a host that would have been connected to, so an `out of reach` one has none.
 The counts at the end then add how many there were, as `5 resolved`, and `--h3` works as above.
+
+**With `--each-address`,** every address of a host gets a request of its own instead of only the first
+that can be connected to, one after the other, with a line per address for the status line of the
+response or what went wrong:
+
+```
+example.com: answered
+  record: HTTPS 1 . alpn=h3,h2
+  address: 2001:db8::1 200 OK
+  address: 192.0.2.1 200 OK
+```
+
+All other hosts get the outcome they always get. A host counts as `answered` only if all of its
+addresses did, whatever the status, and otherwise as `failed`. This is the one exception to one request
+per host, and it can't go with `--dns-only`. `--timeout-ms` then is per address on each route. Beyond
+that, the next paragraph holds for each address, and nothing is followed here either. HTTP/2 and HTTP/3
+have no reason phrase, so there the `OK` is what that status is called.
 
 **One request means one.** The next route is for when connecting failed. Once a request has gone out,
 the host has been asked, so that a timeout or a response cut short ends it there, as a failure.

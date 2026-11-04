@@ -44,6 +44,19 @@ std::string address_text(std::string_view address, bool color)
 }
 
 //
+// What came of the request to one address: the status line, as far as it goes without the version,
+// which the routes say more about, or what went wrong.
+//
+std::string reply_text(const AddressReply& reply, bool color)
+{
+   if (!reply.error.empty())
+      return std::format("{}: {}", colored("failed", color_of::bad, color), reply.error);
+   return reply.reason.empty()
+             ? status_text(reply.status, color)
+             : std::format("{} {}", status_text(reply.status, color), reply.reason);
+}
+
+//
 // The value of an address hint: the addresses have a colour, the commas between them do not.
 //
 std::string address_list_text(std::string_view list, bool color)
@@ -95,15 +108,21 @@ std::string format_result(const Result& result, bool color)
    switch (result.outcome)
    {
    case Outcome::answered:
-      text = std::format("{}: {} [{}] at {}, {} bytes in {}\n", host,
-                         status_text(result.status, color), result.route,
-                         address_text(result.address, color), result.body_size, result.duration);
+      text =
+         !result.replies.empty()
+            ? std::format("{}: {}\n", host, colored("answered", color_of::good, color))
+            : std::format("{}: {} [{}] at {}, {} bytes in {}\n", host,
+                          status_text(result.status, color), result.route,
+                          address_text(result.address, color), result.body_size, result.duration);
       break;
    case Outcome::failed:
-      text = std::format(
-         "{}: {}{}: {}\n", host, colored("failed", color_of::bad, color),
-         result.address.empty() ? "" : std::format(" at {}", address_text(result.address, color)),
-         result.error);
+      text = !result.replies.empty()
+                ? std::format("{}: {}\n", host, colored("failed", color_of::bad, color))
+                : std::format("{}: {}{}: {}\n", host, colored("failed", color_of::bad, color),
+                              result.address.empty()
+                                 ? ""
+                                 : std::format(" at {}", address_text(result.address, color)),
+                              result.error);
       break;
    case Outcome::out_of_reach:
       text = std::format("{}: {}\n", host, colored("out of reach", color_of::moved, color));
@@ -126,6 +145,9 @@ std::string format_result(const Result& result, bool color)
       text += std::format("  record: {}\n", record_text(record, color));
    for (const auto& address : result.addresses)
       text += std::format("  address: {}\n", address_text(address, color));
+   for (const auto& reply : result.replies)
+      text += std::format("  address: {} {}\n", address_text(reply.address, color),
+                          reply_text(reply, color));
    for (const auto& note : result.notes)
       text += colored(std::format("  note: {}", note), color_of::note, color) + "\n";
    for (const auto& [name, value] : result.fields)

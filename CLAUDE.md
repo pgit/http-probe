@@ -9,10 +9,11 @@ its own: anyhttp for HTTP and c-ares-async for DNS.
 
 These hold for all code in this repository, including tests and experiments.
 
-- **One request per host, and nothing more.** c-ares-async's lists of hosts are fine as input here,
-  which is what makes this rule matter: they have 1000 mixed sites, some adult or spam-looking. So
-  nothing is followed: no links, no redirects and no Alt-Svc. Another route is for a connection that
-  failed: once a request has gone out, that was it for the host, however it ended.
+- **One request per hostname, but if explicitly enabled, also one request per IP, and nothing
+  more.** c-ares-async's lists of hosts are fine as input here, which is what makes this rule
+  matter: they have 1000 mixed sites, some adult or spam-looking. So nothing is followed: no links,
+  no redirects and no Alt-Svc. Another route is for a connection that failed: once a request has
+  gone out, that was it for the hostname, or for the IP if enabled, however it ended.
 - **Tests connect to local servers on loopback only.**
 - **If the program ever crawls, it refuses to run without an explicit host allowlist,** with
   robots.txt and per-host rate limits built in from the start, not added later.
