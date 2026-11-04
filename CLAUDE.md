@@ -45,7 +45,7 @@ any I/O, and [prober.cpp](src/prober.cpp) does the rest. The tests in [test/](te
 ## Style
 
 As in anyhttp: clang-format with 3-space indent and 100 columns, members `foo_`, functions
-`snake_case`, types `CamelCase`. Commit subjects are prefixed `fix:`, `refactor:`, `docs:`, `chore:`
-or `test:`.
+`snake_case`, types `CamelCase`. Commit subjects are prefixed `feat:`, `fix:`, `docs:`, `style:`,
+`refactor:`, `perf:`, `test:`, `build:`, `ci:`, `chore:` or `revert:`.
 
 Commit or push only when asked. Push over SSH to git@github.com; Peter opens the pull requests.
