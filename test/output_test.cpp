@@ -88,6 +88,62 @@ TEST(Output, CountsTheHostsLeftOutOnlyIfThereAreAny)
    EXPECT_THAT(format_summary({{Outcome::answered, 3}}, false), Not(HasSubstr("h3")));
 }
 
+TEST(Output, ListsTheAddressesOfAHostThatWasOnlyLookedUp)
+{
+   const Result result{.host = "example.com",
+                       .outcome = Outcome::resolved,
+                       .records = {{.priority = 1, .target = ".", .params = {"alpn=h3"}}},
+                       .addresses = {"2001:db8::1", "192.0.2.1"}};
+
+   EXPECT_EQ(format_result(result, false), "example.com: resolved\n"
+                                           "  record: HTTPS 1 . alpn=h3\n"
+                                           "  address: 2001:db8::1\n"
+                                           "  address: 192.0.2.1\n");
+
+   const auto text = format_result(result, true);
+   EXPECT_THAT(text, HasSubstr("\x1b[32mresolved\x1b[0m"));
+   EXPECT_THAT(text, HasSubstr("address: \x1b[34m2001:db8::1\x1b[0m"));
+   EXPECT_THAT(text, HasSubstr("address: \x1b[35m192.0.2.1\x1b[0m"));
+}
+
+TEST(Output, CountsTheHostsOnlyLookedUpOnlyIfThereAreAny)
+{
+   EXPECT_EQ(format_summary({{Outcome::resolved, 3}, {Outcome::no_h3, 5}}, false),
+             "0 answered, 0 failed, 0 out of reach, 0 not found, 0 lookups failed, 5 without h3, "
+             "3 resolved");
+   EXPECT_THAT(format_summary({{Outcome::answered, 3}}, false), Not(HasSubstr("resolved")));
+}
+
+TEST(Output, HasALinePerAddressWithARequestToEach)
+{
+   const Result result{.host = "example.com",
+                       .outcome = Outcome::failed,
+                       .records = {{.priority = 1, .target = ".", .params = {"alpn=h2"}}},
+                       .replies = {{.address = "2001:db8::1", .status = 200, .reason = "OK"},
+                                   {.address = "192.0.2.1", .status = 299},
+                                   {.address = "192.0.2.2", .error = "[h2 x:443] connect: no"}}};
+
+   EXPECT_EQ(format_result(result, false), "example.com: failed\n"
+                                           "  record: HTTPS 1 . alpn=h2\n"
+                                           "  address: 2001:db8::1 200 OK\n"
+                                           "  address: 192.0.2.1 299\n"
+                                           "  address: 192.0.2.2 failed: [h2 x:443] connect: no\n");
+
+   const auto text = format_result(result, true);
+   EXPECT_THAT(text, HasSubstr("address: \x1b[34m2001:db8::1\x1b[0m \x1b[32m200\x1b[0m OK"));
+   EXPECT_THAT(text, HasSubstr("\x1b[31mfailed\x1b[0m: [h2 x:443]"));
+}
+
+TEST(Output, SaysThatAllAddressesAnswered)
+{
+   const Result result{.host = "example.com",
+                       .outcome = Outcome::answered,
+                       .replies = {{.address = "192.0.2.1", .status = 301, .reason = "Moved"}}};
+
+   EXPECT_EQ(format_result(result, false), "example.com: answered\n"
+                                           "  address: 192.0.2.1 301 Moved\n");
+}
+
 TEST(Output, ColoursTheWayCAresAsyncDoes)
 {
    const auto text = format_result(answered(), true);

@@ -160,6 +160,12 @@ po::options_description describe_options(Arguments& arguments)
         "how long one request may take");
    opts("h3", po::bool_switch(&config.h3_only),
         "connect only to the hosts with an HTTPS record that offers HTTP/3");
+   opts("dns-only", po::bool_switch(&config.dns_only),
+        "connect to nothing: stop after the lookups, and print the records and the addresses of "
+        "each host");
+   opts("each-address", po::bool_switch(&config.each_address),
+        "send a request to each address of a host and print the status line of each, instead of "
+        "one request per host");
    opts("all", po::bool_switch(&arguments.all),
         "also print the hosts that do not exist, and those that --h3 leaves out");
    opts("color", po::bool_switch(&arguments.color),

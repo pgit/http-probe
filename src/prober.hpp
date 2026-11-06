@@ -70,6 +70,14 @@ struct Config
    /// treated as usual, which includes going over TCP if HTTP/3 can not be connected to.
    bool h3_only = false;
 
+   /// Stop after the lookups, with the addresses that it would have gone on to connect to, and
+   /// connect to nothing. See Result::Outcome::resolved.
+   bool dns_only = false;
+
+   /// Send a request to each address of a host, one at a time, rather than to the first that can be
+   /// connected to. Config::timeout then is per address on each route. See Result::replies.
+   bool each_address = false;
+
    /// Where the messages of this program and of c-ares go. anyhttp can't be told: it always uses
    /// the default logger of spdlog, so a logger other than that one can have a level of its own.
    std::shared_ptr<spdlog::logger> logger = spdlog::default_logger();
@@ -89,17 +97,27 @@ std::vector<std::string> read_hosts(std::istream& list, std::vector<std::string>
 /// Moves the IPv6 addresses to the front, each family keeping the order it was in.
 void prefer_ipv6(std::vector<corosio::endpoint>& addresses);
 
+/// What came of the request to one address of a host, see Config::each_address.
+struct AddressReply
+{
+   std::string address;
+   int status = 0; ///< without \c error
+   std::string reason; ///< without \c error: "OK", which HTTP/2 and HTTP/3 only know by the status
+   std::string error; ///< what went wrong on the last route, if no response could be had
+};
+
 /// What came of one host.
 struct Result
 {
    enum class Outcome
    {
-      answered, ///< a response arrived, whatever its status
-      failed, ///< it was connected to, and no response could be had
+      answered, ///< a response arrived, whatever its status, with Config::each_address from all
+      failed, ///< it was connected to, and no response could be had, or not from all addresses
       out_of_reach, ///< not connected to, its records say so or lead elsewhere, see plan_routes()
       not_found, ///< not connected to, the name does not exist
       lookup_failed, ///< not connected to, DNS gave no answer, so there is no telling
       no_h3, ///< not connected to, it has no record that offers HTTP/3, see Config::h3_only
+      resolved, ///< not connected to, but it could have been tried, see Config::dns_only
    };
 
    std::string host;
@@ -115,7 +133,9 @@ struct Result
 
    /// The address that answered or, with \c failed, the last one contacted. Empty without one.
    std::string address;
+   std::vector<std::string> addresses; ///< with \c resolved: all of them, in the order of trying
    std::string error; ///< with \c failed: what went wrong on the last route
+   std::vector<AddressReply> replies; ///< with Config::each_address, instead of the above
    std::vector<std::string> notes; ///< records that could not be used, routes that did not work
 };
 
@@ -125,7 +145,9 @@ struct Result
  * trying its addresses one at a time on each route, IPv6 first. A response is what comes back,
  * whatever its status: a redirect is reported and not followed, nothing in the body is looked at,
  * and nothing else on the host is requested. The next route is for a connection that did not come
- * about: once a request has gone out, that was it for this host, however it ended.
+ * about: once a request has gone out, that was it for this host, however it ended. With
+ * Config::dns_only, it is the lookups and nothing else. With Config::each_address, all of this goes
+ * for each address of the host instead of for the host: one request per address, in order.
  *
  * Hosts are worked on Config::concurrency at a time, so results arrive as they are ready. All of
  * this is on the one executor, which is also what calls the observer.
@@ -156,6 +178,9 @@ private:
    capy::task<capy::results<>> work();
    capy::task<ServiceRecords> resolve_service(const std::string& host);
    capy::task<Result> probe(const std::string& host);
+   capy::task<AddressReply> ask_address(const std::vector<Route>& routes, const std::string& host,
+                                        const corosio::endpoint& address,
+                                        std::vector<std::string>& notes);
    capy::task<capy::results<Response>> attempt(const Route& route, const std::string& host,
                                                const corosio::endpoint& endpoint,
                                                std::chrono::steady_clock::time_point deadline);
