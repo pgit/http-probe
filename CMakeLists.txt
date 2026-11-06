@@ -48,7 +48,7 @@ set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
 include(FetchContent)
 FetchContent_Declare(anyhttp
     GIT_REPOSITORY https://github.com/pgit/anyhttp.git
-    GIT_TAG cc3faee4fb351a56bbca48db7cfcac7585e59e8b
+    GIT_TAG 296e8ee11f2bec37aa1bf5edf345017d888e381a
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
@@ -56,17 +56,17 @@ FetchContent_Declare(c_ares_async
     SYSTEM)
 
 #
-# Both libraries pin these as well, to the same commits for now. The first declaration wins, so these
-# are the ones both of them get, and here they are SYSTEM, too.
+# Both libraries pin these as well. The first declaration wins, so these are the ones both of them
+# get, and here they are SYSTEM, too. They follow anyhttp's pins, which c-ares-async's lag behind.
 #
 FetchContent_Declare(capy
     GIT_REPOSITORY https://github.com/cppalliance/capy.git
-    GIT_TAG 24c54af2cf967ccbf8d3809af4bcd9c8f61f553b
+    GIT_TAG bdadc6adef8c8eb79da6454373175bb1428be524
     EXCLUDE_FROM_ALL
     SYSTEM)
 FetchContent_Declare(corosio
     GIT_REPOSITORY https://github.com/cppalliance/corosio.git
-    GIT_TAG 41d0de18b6e4fa1b397c38a866f2daf52c6c36b5
+    GIT_TAG fd8e95a7125047d5385068a4c640da8232b9588e
     EXCLUDE_FROM_ALL
     SYSTEM)
 
