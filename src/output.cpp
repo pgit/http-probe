@@ -133,8 +133,8 @@ std::string format_result(const Result& result, bool color)
    case Outcome::lookup_failed:
       text = std::format("{}: {}\n", host, colored("lookup failed", color_of::bad, color));
       break;
-   case Outcome::no_h3:
-      text = std::format("{}: no h3 record\n", host);
+   case Outcome::left_out:
+      text = std::format("{}: left out\n", host);
       break;
    case Outcome::resolved:
       text = std::format("{}: {}\n", host, colored("resolved", color_of::good, color));
@@ -168,7 +168,7 @@ std::string format_summary(Counts counts, bool color)
       count(Outcome::failed, "failed", color_of::bad),
       count(Outcome::out_of_reach, "out of reach", color_of::moved), counts[Outcome::not_found],
       count(Outcome::lookup_failed, "lookups failed", color_of::bad),
-      counts[Outcome::no_h3] ? std::format(", {} without h3", counts[Outcome::no_h3]) : "",
+      counts[Outcome::left_out] ? std::format(", {} left out", counts[Outcome::left_out]) : "",
       counts[Outcome::resolved]
          ? std::format(", {}", count(Outcome::resolved, "resolved", color_of::good))
          : "");

@@ -354,22 +354,16 @@ capy::task<Result> Prober::probe(const std::string& host)
    result.aliased = found.aliased;
    result.records = found.records;
 
-   const auto plan = plan_routes(host, found, config_.default_port);
+   const auto plan = plan_routes(host, found, config_.protocols, config_.default_port);
    result.notes = plan.rejected;
    for (const auto& rejected : plan.rejected)
       config_.logger->debug("{}: rejected: {}", host, rejected);
-
-   if (config_.h3_only && !found.lookup_failed && !found.not_found && !has_h3_record(found))
-   {
-      config_.logger->debug("{}: left out, no record offers HTTP/3", host);
-      result.outcome = Result::Outcome::no_h3;
-      co_return result;
-   }
 
    if (plan.routes.empty())
    {
       result.outcome = found.lookup_failed ? Result::Outcome::lookup_failed
                        : found.not_found   ? Result::Outcome::not_found
+                       : plan.left_out     ? Result::Outcome::left_out
                                            : Result::Outcome::out_of_reach;
       co_return result;
    }
@@ -558,6 +552,20 @@ capy::task<capy::results<Prober::Response>> Prober::exchange(anyhttp::client::Cl
                     Response{.error = std::format("connect: {}", connect_ec.message())}};
 
       session = std::move(connected);
+
+      //
+      // anyhttp's h2 offers HTTP/1.1 as well, and a server that does not use ALPN at all gets it,
+      // too. Where that is not one to speak, nothing is asked, and this counts as a connection that
+      // failed, for the next address or route to have a go.
+      //
+      if (const auto protocol = session.protocol(); !config_.protocols.speaks(protocol))
+      {
+         if (auto [shutdown_ec] = co_await session.shutdown(); shutdown_ec)
+            config_.logger->debug("{}: shutdown: {}", url.host(), shutdown_ec.message());
+         co_return {std::make_error_code(std::errc::protocol_not_supported),
+                    Response{.error = std::format("connect: the server chose {}, so no request",
+                                                  protocol_name(protocol))}};
+      }
 
       anyhttp::Fields headers;
       headers.set(http::field::user_agent, user_agent);

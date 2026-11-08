@@ -28,18 +28,19 @@ struct Service
    bool offers(std::string_view protocol) const { return std::ranges::contains(alpn, protocol); }
 
    //
-   // What to connect with, in the order to try them, which is at most one connection per transport.
-   // anyhttp's h2 offers HTTP/1.1 along with it, so that a server still has the choice over TCP.
+   // What to connect with, of those to speak, in the order to try them, which is at most one
+   // connection per transport. anyhttp's h2 offers HTTP/1.1 along with it, so that a server still
+   // has the choice over TCP. Where h1 is not to be spoken, the prober does not take that choice.
    //
-   std::vector<anyhttp::Protocol> protocols() const
+   std::vector<anyhttp::Protocol> protocols(const Protocols& to_speak = {}) const
    {
       using enum anyhttp::Protocol;
       std::vector<anyhttp::Protocol> result;
-      if (offers("h3"))
+      if (offers("h3") && to_speak.speaks(h3))
          result.push_back(h3);
-      if (offers("h2"))
+      if (offers("h2") && to_speak.speaks(h2))
          result.push_back(h2);
-      else if (offers("http/1.1"))
+      else if (offers("http/1.1") && to_speak.speaks(h1))
          result.push_back(h1);
       return result;
    }
@@ -122,29 +123,63 @@ std::string to_text(const c_ares_async::https_record& record)
    return text;
 }
 
-std::string Route::to_string() const
+std::string_view protocol_name(anyhttp::Protocol protocol)
 {
    using enum anyhttp::Protocol;
-   return std::format("{} {}:{}", protocol == h3 ? "h3" : protocol == h2 ? "h2" : "h1", host, port);
+   return protocol == h3 ? "h3" : protocol == h2 ? "h2" : "h1";
 }
 
-Plan plan_routes(std::string_view host, const ServiceRecords& found, std::uint16_t default_port)
+//
+// No 'using enum' in the members, which would hide the fields of the same names.
+//
+bool Protocols::speaks(anyhttp::Protocol protocol) const
+{
+   if (!h3 && !h2 && !h1)
+      return true;
+   switch (protocol)
+   {
+   case anyhttp::Protocol::h3:
+      return h3;
+   case anyhttp::Protocol::h2:
+      return h2;
+   case anyhttp::Protocol::h1:
+      return h1;
+   }
+   return false;
+}
+
+bool Protocols::speaks_tcp() const
+{
+   return speaks(anyhttp::Protocol::h2) || speaks(anyhttp::Protocol::h1);
+}
+
+std::string Protocols::to_string() const
+{
+   std::string text;
+   for (const auto protocol : {anyhttp::Protocol::h3, anyhttp::Protocol::h2, anyhttp::Protocol::h1})
+      if (speaks(protocol))
+         text += std::format("{}{}", text.empty() ? "" : " or ", protocol_name(protocol));
+   return text;
+}
+
+std::string Route::to_string() const
+{
+   return std::format("{} {}:{}", protocol_name(protocol), host, port);
+}
+
+Plan plan_routes(std::string_view host, const ServiceRecords& found, const Protocols& protocols,
+                 std::uint16_t default_port)
 {
    Plan plan{.rejected = found.notes};
 
    if (found.lookup_failed || found.not_found)
       return plan;
 
-   if (found.unavailable)
-   {
-      plan.out_of_reach = true;
-      return plan;
-   }
-
    auto records = found.records;
    std::ranges::stable_sort(records, {}, &c_ares_async::https_record::priority);
 
-   bool any_compatible = false;
+   bool any_compatible = false; // a record to take seriously, with a protocol that anyhttp speaks
+   bool any_to_speak = false; // one of those that offers a protocol to speak, wherever it points
    for (const auto& record : records)
    {
       const auto text = to_text(record);
@@ -155,13 +190,20 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found, std::uint16
          continue;
       }
 
-      const auto protocols = service.protocols();
-      if (protocols.empty())
+      if (service.protocols().empty())
       {
          plan.rejected.push_back(std::format("{}: no protocol that anyhttp speaks", text));
          continue;
       }
       any_compatible = true;
+
+      const auto to_speak = service.protocols(protocols);
+      if (to_speak.empty())
+      {
+         plan.rejected.push_back(std::format("{}: offers no {}", text, protocols.to_string()));
+         continue;
+      }
+      any_to_speak = true;
 
       const auto target = normalize_host(is_own_name(record.target) ? found.owner : record.target);
       if (target != host)
@@ -172,7 +214,7 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found, std::uint16
          continue;
       }
 
-      for (const auto protocol : protocols)
+      for (const auto protocol : to_speak)
       {
          Route route{.protocol = protocol,
                      .host = target,
@@ -190,6 +232,25 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found, std::uint16
       return plan;
 
    //
+   // Not one of the protocols to speak, wherever it would have been. Without a usable record, what
+   // there is is TCP, and that goes for one who says that the service is not available, too.
+   //
+   if (any_compatible ? !any_to_speak : !protocols.speaks_tcp())
+   {
+      if (!any_compatible)
+         plan.rejected.push_back(
+            std::format("no usable HTTPS record offers {}", protocols.to_string()));
+      plan.left_out = true;
+      return plan;
+   }
+
+   if (found.unavailable)
+   {
+      plan.out_of_reach = true;
+      return plan;
+   }
+
+   //
    // After an alias, the name it led to is an endpoint even without any parameters (section 3).
    //
    if (found.aliased && !any_compatible)
@@ -203,19 +264,12 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found, std::uint16
       return plan;
    }
 
-   plan.routes.push_back(Route{.protocol = anyhttp::Protocol::h2,
+   using enum anyhttp::Protocol;
+   plan.routes.push_back(Route{.protocol = protocols.speaks(h2) ? h2 : h1,
                                .host = std::string(host),
                                .port = default_port,
                                .source = "no usable HTTPS record"});
    return plan;
-}
-
-bool has_h3_record(const ServiceRecords& found)
-{
-   return std::ranges::any_of(found.records, [](const c_ares_async::https_record& record) {
-      const auto service = parse_service(record);
-      return !service.incompatible && service.offers("h3");
-   });
 }
 
 // =================================================================================================

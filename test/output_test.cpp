@@ -77,15 +77,15 @@ TEST(Output, SaysWhyThereIsNoResponse)
 
 TEST(Output, SaysThatAHostWasLeftOut)
 {
-   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::no_h3}, false),
-             "example.com: no h3 record\n");
+   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::left_out}, false),
+             "example.com: left out\n");
 }
 
 TEST(Output, CountsTheHostsLeftOutOnlyIfThereAreAny)
 {
-   EXPECT_EQ(format_summary({{Outcome::answered, 3}, {Outcome::no_h3, 5}}, false),
-             "3 answered, 0 failed, 0 out of reach, 0 not found, 0 lookups failed, 5 without h3");
-   EXPECT_THAT(format_summary({{Outcome::answered, 3}}, false), Not(HasSubstr("h3")));
+   EXPECT_EQ(format_summary({{Outcome::answered, 3}, {Outcome::left_out, 5}}, false),
+             "3 answered, 0 failed, 0 out of reach, 0 not found, 0 lookups failed, 5 left out");
+   EXPECT_THAT(format_summary({{Outcome::answered, 3}}, false), Not(HasSubstr("left out")));
 }
 
 TEST(Output, ListsTheAddressesOfAHostThatWasOnlyLookedUp)
@@ -108,8 +108,8 @@ TEST(Output, ListsTheAddressesOfAHostThatWasOnlyLookedUp)
 
 TEST(Output, CountsTheHostsOnlyLookedUpOnlyIfThereAreAny)
 {
-   EXPECT_EQ(format_summary({{Outcome::resolved, 3}, {Outcome::no_h3, 5}}, false),
-             "0 answered, 0 failed, 0 out of reach, 0 not found, 0 lookups failed, 5 without h3, "
+   EXPECT_EQ(format_summary({{Outcome::resolved, 3}, {Outcome::left_out, 5}}, false),
+             "0 answered, 0 failed, 0 out of reach, 0 not found, 0 lookups failed, 5 left out, "
              "3 resolved");
    EXPECT_THAT(format_summary({{Outcome::answered, 3}}, false), Not(HasSubstr("resolved")));
 }
