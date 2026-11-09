@@ -48,7 +48,7 @@ set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
 include(FetchContent)
 FetchContent_Declare(anyhttp
     GIT_REPOSITORY https://github.com/pgit/anyhttp.git
-    GIT_TAG 296e8ee11f2bec37aa1bf5edf345017d888e381a
+    GIT_TAG bc985a0e040d8b2dd027552b964bde19b0fbf38a
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
