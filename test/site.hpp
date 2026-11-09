@@ -63,6 +63,7 @@ public:
 
    std::uint16_t port() const { return port_; }
    const std::filesystem::path& ca_file() const { return certificate_file_; }
+   const std::filesystem::path& key_file() const { return key_file_; } ///< of the certificate
 
    /// The zone. Good until stop(), as opposed to what was asked of it, see dns_queries().
    fake_dns_server& dns() { return *dns_; }

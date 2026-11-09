@@ -29,6 +29,7 @@ ServiceRecords found(std::vector<c_ares_async::https_record> records,
 std::vector<std::string> routes(const Plan& plan)
 {
    std::vector<std::string> result;
+   result.reserve(plan.routes.size());
    for (const auto& route : plan.routes)
       result.push_back(route.to_string());
    return result;
@@ -121,13 +122,13 @@ TEST(Plan, GoesOverTcpToTheDefaultPortWithoutARecord)
 {
    EXPECT_THAT(routes(plan_routes("example.com", found({}))), ElementsAre("h2 example.com:443"));
    EXPECT_THAT(plan_routes("example.com", found({})).rejected, IsEmpty()) << "nothing odd about it";
-   EXPECT_THAT(routes(plan_routes("example.com", found({}), 8443)),
+   EXPECT_THAT(routes(plan_routes("example.com", found({}), {}, 8443)),
                ElementsAre("h2 example.com:8443"));
 }
 
 TEST(Plan, RecordsThatDoNotSayGoToTheDefaultPort)
 {
-   EXPECT_THAT(routes(plan_routes("example.com", found({record(1, ".", {"alpn=h2"})}), 8443)),
+   EXPECT_THAT(routes(plan_routes("example.com", found({record(1, ".", {"alpn=h2"})}), {}, 8443)),
                ElementsAre("h2 example.com:8443"));
 }
 
@@ -289,36 +290,163 @@ TEST(Plan, TreatsARecordWithAnInvalidPortAsNoRecord)
    EXPECT_THAT(routes(plan), ElementsAre("h2 example.com:443"));
 }
 
-TEST(HasH3Record, IsTrueForARecordThatOffersIt)
-{
-   EXPECT_TRUE(has_h3_record(found({record(1, ".", {"alpn=h3"})})));
-   EXPECT_TRUE(has_h3_record(found({record(1, ".", {"alpn=h2,h3"})})));
-   EXPECT_TRUE(has_h3_record(found({record(1, ".", {"alpn=h2"}), record(2, ".", {"alpn=h3"})})));
-}
-
-TEST(HasH3Record, DoesNotCareWhereTheRecordPoints)
-{
-   EXPECT_TRUE(has_h3_record(found({record(1, "other.example", {"alpn=h3"})})));
-}
-
-TEST(HasH3Record, IsFalseForAnythingElse)
-{
-   EXPECT_FALSE(has_h3_record(found({})));
-   EXPECT_FALSE(has_h3_record(found({record(1, ".")})));
-   EXPECT_FALSE(has_h3_record(found({record(1, ".", {"alpn=h2"})})));
-   EXPECT_FALSE(has_h3_record(found({record(1, ".", {"alpn=h3-29,h2"})})));
-}
-
-TEST(HasH3Record, IgnoresARecordThatHasToBeIgnored)
-{
-   EXPECT_FALSE(has_h3_record(found({record(1, ".", {"alpn=h3", "mandatory=ech", "ech=dead"})})));
-   EXPECT_FALSE(has_h3_record(found({record(1, ".", {"alpn=h3", "port=none"})})));
-}
-
 TEST(Plan, PassesOnWhatWentWrongInTheLookup)
 {
    auto records = found({});
-   records.notes.push_back("HTTPS lookup failed");
+   records.notes.emplace_back("HTTPS lookup failed");
 
    EXPECT_THAT(plan_routes("example.com", records).rejected.front(), "HTTPS lookup failed");
+}
+
+// -------------------------------------------------------------------------------------------------
+// --h3, --h2 and --h1
+// -------------------------------------------------------------------------------------------------
+
+namespace
+{
+const Protocols h3{.h3 = true};
+const Protocols h2{.h2 = true};
+const Protocols h1{.h1 = true};
+} // namespace
+
+TEST(Protocols, SpeaksThoseGivenOrAllWithoutAny)
+{
+   EXPECT_TRUE(Protocols{}.speaks(anyhttp::Protocol::h3));
+   EXPECT_TRUE(Protocols{}.speaks(anyhttp::Protocol::h1));
+   EXPECT_TRUE(h2.speaks(anyhttp::Protocol::h2));
+   EXPECT_FALSE(h2.speaks(anyhttp::Protocol::h1));
+   EXPECT_FALSE(h3.speaks_tcp());
+   EXPECT_TRUE((Protocols{.h3 = true, .h1 = true}).speaks_tcp());
+}
+
+TEST(Protocols, SaysWhichTheyAre)
+{
+   EXPECT_EQ(h2.to_string(), "h2");
+   EXPECT_EQ((Protocols{.h3 = true, .h1 = true}).to_string(), "h3 or h1");
+   EXPECT_EQ(Protocols{}.to_string(), "h3 or h2 or h1");
+}
+
+TEST(Plan, SpeaksOnlyTheProtocolsGiven)
+{
+   const auto records = found({record(1, ".", {"alpn=h3,h2"})});
+
+   EXPECT_THAT(routes(plan_routes("example.com", records, h3)), ElementsAre("h3 example.com:443"));
+   EXPECT_THAT(routes(plan_routes("example.com", records, h2)), ElementsAre("h2 example.com:443"));
+   EXPECT_THAT(routes(plan_routes("example.com", records, h1)), ElementsAre("h1 example.com:443"))
+      << "the default set";
+   EXPECT_THAT(routes(plan_routes("example.com", records, {.h3 = true, .h1 = true})),
+               ElementsAre("h3 example.com:443", "h1 example.com:443"));
+}
+
+TEST(Plan, LeavesTheChoiceOverTcpToTheServerWithBothOfThem)
+{
+   const auto plan =
+      plan_routes("example.com", found({record(1, ".", {"alpn=h2"})}), {.h2 = true, .h1 = true});
+
+   EXPECT_THAT(routes(plan), ElementsAre("h2 example.com:443"));
+}
+
+TEST(Plan, GoesOverTcpWithoutARecordWithTheProtocolGiven)
+{
+   EXPECT_THAT(routes(plan_routes("example.com", found({}), h2)),
+               ElementsAre("h2 example.com:443"));
+   EXPECT_THAT(routes(plan_routes("example.com", found({}), h1)),
+               ElementsAre("h1 example.com:443"));
+   EXPECT_THAT(routes(plan_routes("example.com", found({}), {.h3 = true, .h1 = true})),
+               ElementsAre("h1 example.com:443"));
+}
+
+TEST(Plan, LeavesOutAHostWithoutARecordForH3Alone)
+{
+   const auto plan = plan_routes("example.com", found({}), h3);
+
+   EXPECT_THAT(plan.routes, IsEmpty());
+   EXPECT_TRUE(plan.left_out);
+   EXPECT_FALSE(plan.out_of_reach);
+   EXPECT_THAT(plan.rejected, ElementsAre("no usable HTTPS record offers h3"));
+}
+
+TEST(Plan, LeavesOutAHostWhoseRecordsOfferNoneOfThem)
+{
+   const auto plan = plan_routes("example.com",
+                                 found({record(1, ".", {"alpn=h3", "no-default-alpn"}),
+                                        record(2, ".", {"alpn=h3-29,h2", "no-default-alpn"})}),
+                                 h1);
+
+   EXPECT_THAT(plan.routes, IsEmpty());
+   EXPECT_TRUE(plan.left_out);
+   EXPECT_FALSE(plan.out_of_reach);
+   EXPECT_THAT(plan.rejected, ElementsAre(HasSubstr("offers no h1"), HasSubstr("offers no h1")));
+}
+
+TEST(Plan, SaysWhichRecordsOfferNoneOfThem)
+{
+   const auto plan = plan_routes(
+      "example.com", found({record(1, ".", {"alpn=h2"}), record(2, ".", {"alpn=h3", "port=8443"})}),
+      h3);
+
+   EXPECT_THAT(routes(plan), ElementsAre("h3 example.com:8443"));
+   EXPECT_THAT(plan.rejected, ElementsAre("HTTPS 1 . alpn=h2: offers no h3"));
+}
+
+TEST(Plan, LeavesOutOnlyByWhatTheRecordsOfferWhereverTheyPoint)
+{
+   //
+   // A record that offers the protocol, on a target that can't be used, is out of reach as ever.
+   //
+   const auto offered =
+      plan_routes("example.com", found({record(1, "other.example", {"alpn=h3"})}), h3);
+   EXPECT_TRUE(offered.out_of_reach);
+   EXPECT_FALSE(offered.left_out);
+
+   const auto not_offered = plan_routes(
+      "example.com", found({record(1, "other.example", {"alpn=h2", "no-default-alpn"})}), h3);
+   EXPECT_TRUE(not_offered.left_out);
+   EXPECT_FALSE(not_offered.out_of_reach);
+}
+
+TEST(Plan, TakesARecordThatHasToBeIgnoredForNoRecordWithTheProtocolsGiven)
+{
+   for (const auto& params : std::vector<std::vector<std::string>>{
+           {"alpn=h3", "mandatory=ech", "ech=dead"}, {"alpn=h3", "port=none"}})
+   {
+      const auto records = found({record(1, ".", params)});
+
+      EXPECT_TRUE(plan_routes("example.com", records, h3).left_out);
+      EXPECT_THAT(routes(plan_routes("example.com", records, h2)),
+                  ElementsAre("h2 example.com:443"));
+   }
+}
+
+TEST(Plan, LeavesOutAnUnavailableServiceWithoutTcp)
+{
+   auto records = found({});
+   records.unavailable = true;
+
+   EXPECT_TRUE(plan_routes("example.com", records, h3).left_out);
+   EXPECT_TRUE(plan_routes("example.com", records, h1).out_of_reach);
+   EXPECT_FALSE(plan_routes("example.com", records, h1).left_out);
+}
+
+TEST(Plan, LeavesOutTheTargetOfAnAliasWithoutTcp)
+{
+   const auto records = found({}, "other.example", true);
+
+   EXPECT_TRUE(plan_routes("example.com", records, h3).left_out);
+   EXPECT_TRUE(plan_routes("example.com", records, h2).out_of_reach);
+}
+
+TEST(Plan, LeavesOutNeitherANameThatDoesNotExistNorOneThatWasNotLookedUp)
+{
+   auto not_found = found({});
+   not_found.not_found = true;
+   auto lookup_failed = found({});
+   lookup_failed.lookup_failed = true;
+
+   for (const auto& records : {not_found, lookup_failed})
+   {
+      const auto plan = plan_routes("example.com", records, h3);
+      EXPECT_FALSE(plan.left_out);
+      EXPECT_FALSE(plan.out_of_reach);
+   }
 }

@@ -20,7 +20,8 @@ It looks up the HTTPS records of each host in DNS ([RFC 9460](https://www.rfc-ed
 and requests `https://<host>/` once, over TLS, in the way that the records say. It prints the status,
 the route, the IP address it connected to, the time it took and the header fields of the response,
 along with the host's records. A redirect is reported and not followed, and nothing else on the host
-is requested. [Here is what that looks like](doc/README.md).
+is requested. Its `Location` goes at the end of the status line, as in `301 … -> https://www.example.com/`,
+as it came: not resolved against the URL, and not looked up. [Here is what that looks like](doc/README.md).
 
 There is output for every host but those that do not exist, which `--all` adds. The counts at the end
 look like this, on stderr:
@@ -37,7 +38,7 @@ look like this, on stderr:
 | has a record that says the service is not available | out of reach, not connected to        |
 | does not exist                                | not found, not connected to                 |
 | gets no answer from DNS, or has no address    | lookup failed, so there is no telling, not connected to |
-| has no record that offers `h3`, with `--h3`   | without h3, not connected to                |
+| offers none of the protocols of `--h3`, `--h2` and `--h1`, with any of them | left out, not connected to |
 | could be connected to, with `--dns-only`      | resolved, not connected to                  |
 | could be connected to, with `--each-address`  | answered if all of its addresses did, otherwise failed |
 
@@ -46,10 +47,17 @@ record, HTTP/3 goes first, and then TCP on the same port: HTTP/2 if the record h
 HTTP/1.1, which is in every record that does not say `no-default-alpn`. The route in the output is
 what the server went for, which may be HTTP/1.1 where HTTP/2 was offered.
 
-**With `--h3`,** only hosts with a compatible record that has `h3` in its `alpn` go ahead, on whichever
-target, and they are treated as above, so that one can still end up out of reach, or going over TCP
-when HTTP/3 can not be connected to. The others are left out after their HTTPS lookup, and printed
-only with `--all`. The counts at the end then add how many there were, as `5 without h3`.
+**With `--h3`, `--h2` or `--h1`,** only the protocols given are spoken, in any combination, and all
+three without any of them. HTTP/3 needs a compatible record with `h3` in its `alpn`. HTTP/2 and
+HTTP/1.1 need a record that offers them, or no compatible record at all, which means port 443. A host
+that offers none of the protocols given, on whichever target, is left out after its HTTPS lookup,
+printed only with `--all` and with a note on why, and counted at the end as `5 left out`. The others
+are treated as above, with the routes of those protocols only, so that one can still end up out of
+reach. With `--h3` alone, that means no going over TCP when HTTP/3 can not be connected to.
+
+anyhttp offers HTTP/1.1 along with HTTP/2, and a server may take it, or not use ALPN at all, which
+comes to the same. With `--h2` but not `--h1`, such a server is not sent the request. That counts as a
+connection that failed, so the next address or route gets its turn.
 
 **With `--dns-only`,** it stops at the point where it would connect, so that no host is connected to
 or requested. A host that would have been goes by `resolved` and comes with its records and all of
@@ -64,7 +72,8 @@ example.com: resolved
 
 All other hosts get the outcome they always get, which leaves `answered` and `failed` at 0. The addresses
 are only looked up for a host that would have been connected to, so an `out of reach` one has none.
-The counts at the end then add how many there were, as `5 resolved`, and `--h3` works as above.
+The counts at the end then add how many there were, as `5 resolved`, and `--h3`, `--h2` and `--h1`
+work as above.
 
 **With `--each-address`,** every address of a host gets a request of its own instead of only the first
 that can be connected to, one after the other, with a line per address for the status line of the
@@ -79,9 +88,12 @@ example.com: answered
 
 All other hosts get the outcome they always get. A host counts as `answered` only if all of its
 addresses did, whatever the status, and otherwise as `failed`. This is the one exception to one request
-per host, and it can't go with `--dns-only`. `--timeout-ms` then is per address on each route. Beyond
+per host, and it can't go with `--dns-only`. The addresses are all asked at the same time, so a host
+takes as long as its slowest address, and they are printed in the order of trying them all the same.
+`--timeout-ms` then is per address on each route. Beyond
 that, the next paragraph holds for each address, and nothing is followed here either. HTTP/2 and HTTP/3
-have no reason phrase, so there the `OK` is what that status is called.
+have no reason phrase, so there the `OK` is what that status is called. A redirect has its `Location`
+at the end of the line, as in `301 Moved Permanently -> /elsewhere`, and the header fields are left out.
 
 **One request means one.** The next route is for when connecting failed. Once a request has gone out,
 the host has been asked, so that a timeout or a response cut short ends it there, as a failure.

@@ -184,7 +184,7 @@ The two tokens in `set-cookie` and `report-to` are cut short to `…`.
 21:01:20.687 debug [h3:[2606:4700::6810:84e5]:443] write_pkt: nghttp3_conn_writev_stream -> stream=-1 sveccnt=0 fin=0
 --- 62 ------------------------------------------------------------------------
 21:01:20.688 info [client] dtor
-cloudflare.com: 301 [h3 cloudflare.com:443] at 2606:4700::6810:84e5, 167 bytes in 82ms
+cloudflare.com: 301 [h3 cloudflare.com:443] at 2606:4700::6810:84e5, 167 bytes in 82ms -> https://www.cloudflare.com/
   record: HTTPS 1 . alpn=h3,h2 ipv4hint=104.16.132.229,104.16.133.229 ipv6hint=2606:4700::6810:84e5,2606:4700::6810:85e5
   content-type: text/html; charset=UTF-8
   date: Tue, 03 Nov 2026 21:01:21 GMT

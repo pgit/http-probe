@@ -6,7 +6,12 @@
 
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/corosio/io_context.hpp>
-#include <boost/program_options.hpp>
+#include <boost/program_options/errors.hpp>
+#include <boost/program_options/options_description.hpp>
+#include <boost/program_options/parsers.hpp>
+#include <boost/program_options/positional_options.hpp>
+#include <boost/program_options/value_semantic.hpp>
+#include <boost/program_options/variables_map.hpp>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -158,8 +163,14 @@ po::options_description describe_options(Arguments& arguments)
               config.timeout = std::chrono::milliseconds(not_negative("--timeout-ms", value));
            }),
         "how long one request may take");
-   opts("h3", po::bool_switch(&config.h3_only),
-        "connect only to the hosts with an HTTPS record that offers HTTP/3");
+   opts("h3", po::bool_switch(&config.protocols.h3),
+        "speak HTTP/3, where an HTTPS record offers it. Of --h3, --h2 and --h1, only those given "
+        "are spoken, all of them without any, and a host that offers none of them is left out");
+   opts("h2", po::bool_switch(&config.protocols.h2),
+        "speak HTTP/2, over TCP where a record offers it or there is none. Without --h1, a server "
+        "that chooses HTTP/1.1 is not sent the request");
+   opts("h1", po::bool_switch(&config.protocols.h1),
+        "speak HTTP/1.1, over TCP where a record offers it or there is none");
    opts("dns-only", po::bool_switch(&config.dns_only),
         "connect to nothing: stop after the lookups, and print the records and the addresses of "
         "each host");
@@ -167,7 +178,7 @@ po::options_description describe_options(Arguments& arguments)
         "send a request to each address of a host and print the status line of each, instead of "
         "one request per host");
    opts("all", po::bool_switch(&arguments.all),
-        "also print the hosts that do not exist, and those that --h3 leaves out");
+        "also print the hosts that do not exist, and those that --h3, --h2 or --h1 leave out");
    opts("color", po::bool_switch(&arguments.color),
         "colour the output even where it does not go to a terminal, e.g. into 'less -R'");
    opts("verbose,v", po::value<std::vector<std::string>>()->zero_tokens()->composing(),
@@ -186,7 +197,7 @@ void print_usage(std::ostream& out, const po::options_description& options)
        << wrap(exit_code, columns) << '\n';
 }
 
-void parse_arguments(int argc, char* argv[], const po::options_description& options,
+void parse_arguments(int argc, char** argv, const po::options_description& options,
                      Arguments& arguments)
 {
    try
@@ -305,10 +316,10 @@ int main(int argc, char* argv[])
          ++counts[result.outcome];
          if (!result.records.empty() || result.aliased)
             ++with_records;
-         if (all || (result.outcome != Outcome::not_found && result.outcome != Outcome::no_h3))
+         if (all || (result.outcome != Outcome::not_found && result.outcome != Outcome::left_out))
          {
             std::print("{}", http_probe::format_result(result, color_results));
-            std::fflush(stdout); // a run can take a while, and it is worth watching
+            std::ignore = std::fflush(stdout); // a run can take a while, and it is worth watching
          }
       };
 
@@ -320,9 +331,9 @@ int main(int argc, char* argv[])
       // What a handler throws ends the process, so this one leaves it for after run().
       //
       boost::capy::run_async(
-         context.get_executor(), []() noexcept {},
+         context.get_executor(), [] noexcept {},
          [&](std::exception_ptr ex) noexcept {
-            failed = ex;
+            failed = std::move(ex);
             context.stop();
          })(prober.run());
       if (verbosity >= 2)

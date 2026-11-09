@@ -5,12 +5,17 @@
 #include "prober.hpp"
 #include "site.hpp"
 
+#include <boost/capy/buffers/make_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
+#include <boost/capy/write.hpp>
 #include <boost/corosio/io_context.hpp>
 #include <boost/corosio/ip_address.hpp>
 #include <boost/corosio/ipv6_address.hpp>
+#include <boost/corosio/openssl_stream.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
+#include <boost/corosio/tcp_socket.hpp>
+#include <boost/corosio/tls_context.hpp>
 #include <boost/corosio/udp_socket.hpp>
 
 #include <spdlog/sinks/ostream_sink.h>
@@ -21,6 +26,8 @@
 
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +37,7 @@
 #include <fstream>
 #include <memory>
 #include <ostream>
+#include <ranges>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -54,7 +62,7 @@ namespace boost::corosio
 {
 
 /// What a failed expectation shows of an endpoint: Corosio has no output operator for one.
-inline void PrintTo(const endpoint& endpoint, std::ostream* out)
+static void PrintTo(const endpoint& endpoint, std::ostream* out)
 {
    *out << endpoint.address() << ':' << endpoint.port();
 }
@@ -74,15 +82,17 @@ corosio::ip_address make_address(std::string_view text)
 
 fake_dns_server::svc_param port_param(std::uint16_t port)
 {
-   return {ARES_SVCB_PARAM_PORT,
-           {static_cast<unsigned char>(port >> 8), static_cast<unsigned char>(port & 0xff)}};
+   return {
+      .key = ARES_SVCB_PARAM_PORT,
+      .value = {static_cast<unsigned char>(port >> 8), static_cast<unsigned char>(port & 0xff)}};
 }
 
-const fake_dns_server::svc_param alpn_h3{ARES_SVCB_PARAM_ALPN, {2, 'h', '3'}};
-const fake_dns_server::svc_param alpn_h2{ARES_SVCB_PARAM_ALPN, {2, 'h', '2'}};
-const fake_dns_server::svc_param alpn_h1{ARES_SVCB_PARAM_ALPN,
-                                         {8, 'h', 't', 't', 'p', '/', '1', '.', '1'}};
-const fake_dns_server::svc_param no_default_alpn{ARES_SVCB_PARAM_NO_DEFAULT_ALPN, {}};
+const fake_dns_server::svc_param alpn_h3{.key = ARES_SVCB_PARAM_ALPN, .value = {2, 'h', '3'}};
+const fake_dns_server::svc_param alpn_h2{.key = ARES_SVCB_PARAM_ALPN, .value = {2, 'h', '2'}};
+const fake_dns_server::svc_param alpn_h1{.key = ARES_SVCB_PARAM_ALPN,
+                                         .value = {8, 'h', 't', 't', 'p', '/', '1', '.', '1'}};
+const fake_dns_server::svc_param no_default_alpn{.key = ARES_SVCB_PARAM_NO_DEFAULT_ALPN,
+                                                 .value = {}};
 
 //
 // One protocol and no other, for a test to know which one it is getting. A record with nothing but
@@ -117,16 +127,16 @@ protected:
       //
       // In a variable: the coroutine refers to what the lambda captured, for as long as it runs.
       //
-      const auto run = [&]() -> capy::task<> {
+      const auto run = [&] -> capy::task<> {
          co_await prober.run();
          stop_sites();
       };
 
       std::exception_ptr failed;
       capy::run_async(
-         context.get_executor(), []() noexcept {},
+         context.get_executor(), [] noexcept {},
          [&](std::exception_ptr ex) noexcept {
-            failed = ex;
+            failed = std::move(ex);
             context.stop();
          })(run());
       context.run();
@@ -149,7 +159,7 @@ protected:
 
    corosio::tcp_acceptor silent_tcp_acceptor()
    {
-      return corosio::tcp_acceptor(context, {corosio::ipv6_address::any(), 0});
+      return {context, {corosio::ipv6_address::any(), 0}};
    }
 
    //
@@ -289,6 +299,7 @@ TEST_F(Probe, ReportsARedirectAndDoesNotFollowIt)
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].status, 302);
    EXPECT_THAT(results[0].fields, Contains(Pair("location", "/moved")));
+   EXPECT_EQ(results[0].location, "/moved"); // as it came, not resolved
    EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
 
@@ -475,6 +486,7 @@ TEST_F(Probe, DoesNotFollowARedirectOverHttp2)
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].status, 302) << notes(results[0]);
    EXPECT_THAT(results[0].fields, Contains(Pair("location", "/moved")));
+   EXPECT_EQ(results[0].location, "/moved"); // as it came, not resolved
    EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
 
@@ -490,7 +502,21 @@ TEST_F(Probe, DoesNotFollowARedirectOverHttp1)
    EXPECT_EQ(results[0].status, 302) << notes(results[0]);
    // As it came, and only HTTP/2 and HTTP/3 have field names in lower case on the wire.
    EXPECT_THAT(results[0].fields, Contains(Pair("Location", "/moved")));
+   EXPECT_EQ(results[0].location, "/moved");
    EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, HasADestinationForARedirectOnly)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.status = 201, .location = "/created"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 201) << notes(results[0]);
+   EXPECT_THAT(results[0].fields, Contains(Pair("location", "/created")));
+   EXPECT_THAT(results[0].location, IsEmpty());
 }
 
 TEST_F(Probe, FallsBackToTheNextRecordWhenAConnectionFails)
@@ -677,7 +703,7 @@ TEST_F(Probe, TriesIPv6First)
    EXPECT_EQ(results[0].address, "127.0.0.1"); // the last one tried
 }
 
-corosio::endpoint at(const char* address) { return {make_address(address), 443}; }
+static corosio::endpoint at(const char* address) { return {make_address(address), 443}; }
 
 TEST(PreferIpv6, MovesIPv6ToTheFrontAndKeepsTheOrderWithinEachFamily)
 {
@@ -945,16 +971,16 @@ TEST_F(Probe, ReportsAFailedLookup)
 }
 
 // =================================================================================================
-// --h3
+// --h3, --h2 and --h1
 // =================================================================================================
 
-TEST_F(Probe, H3OnlyRequestsAHostWithARecordThatOffersIt)
+TEST_F(Probe, H3RequestsAHostWithARecordThatOffersIt)
 {
    site.dns().add_https("localhost", 1, ".", {alpn_h3, port_param(site.port())});
    site.page("/", {.body = "hello"});
 
    auto configuration = config();
-   configuration.h3_only = true;
+   configuration.protocols = {.h3 = true};
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
@@ -963,37 +989,156 @@ TEST_F(Probe, H3OnlyRequestsAHostWithARecordThatOffersIt)
    EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
 
-TEST_F(Probe, H3OnlyLeavesOutAHostWithoutARecord)
+TEST_F(Probe, H3LeavesOutAHostWithoutARecord)
 {
    site.dns().add_address("localhost", "127.0.0.1");
    site.page("/", {.body = "hello"});
 
    auto configuration = config();
-   configuration.h3_only = true;
+   configuration.protocols = {.h3 = true};
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::no_h3);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::left_out);
    EXPECT_THAT(results[0].address, IsEmpty());
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 
-TEST_F(Probe, H3OnlyLeavesOutAHostWhoseRecordsDoNotOfferIt)
+TEST_F(Probe, H3LeavesOutAHostWhoseRecordsDoNotOfferIt)
 {
    site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
    site.page("/", {.body = "hello"});
 
    auto configuration = config();
-   configuration.h3_only = true;
+   configuration.protocols = {.h3 = true};
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::no_h3);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::left_out);
    EXPECT_EQ(results[0].records.size(), 1u) << "for --all to say why";
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 
-TEST_F(Probe, H3OnlyStillFallsBackToTcpWhenAConnectionFails)
+TEST_F(Probe, H3DoesNotFallBackToTcp)
+{
+   auto silent = silent_udp_socket();
+
+   site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
+   site.dns().add_https("localhost", 2, ".", {alpn_h2, port_param(site.port())});
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   configuration.protocols = {.h3 = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(results[0].error, HasSubstr("timed out"));
+   EXPECT_THAT(notes(results[0]), HasSubstr("offers no h3"));
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, H3StillSaysThatARecordLeadsElsewhere)
+{
+   site.dns().add_https("localhost", 1, "elsewhere.example.test", h3_at(site.port()));
+
+   auto configuration = config();
+   configuration.protocols = {.h3 = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, H3StillSaysThatANameDoesNotExist)
+{
+   auto configuration = config({"nowhere.example.test"});
+   configuration.protocols = {.h3 = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::not_found);
+}
+
+TEST_F(Probe, H3DoesNotTakeAFailedLookupForNoHttp3)
+{
+   site.dns().set_rcode(ARES_RCODE_SERVFAIL);
+
+   auto configuration = config();
+   configuration.protocols = {.h3 = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, H2SpeaksNothingElseThatTheRecordOffers)
+{
+   const fake_dns_server::svc_param alpn_h3_h2{.key = ARES_SVCB_PARAM_ALPN,
+                                               .value = {2, 'h', '3', 2, 'h', '2'}};
+   site.dns().add_https("localhost", 1, ".", {alpn_h3_h2, port_param(site.port())});
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.protocols = {.h2 = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h2 localhost:{}", site.port()));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, H1SpeaksHttp1WhereTheRecordOffersHttp2AsWell)
+{
+   site.dns().add_https("localhost", 1, ".", {alpn_h2, port_param(site.port())});
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.protocols = {.h1 = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h1 localhost:{}", site.port()));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, H1LeavesOutAHostWhoseRecordsOfferOnlyHttp2)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.protocols = {.h1 = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::left_out);
+   EXPECT_THAT(notes(results[0]), HasSubstr("offers no h1"));
+   EXPECT_THAT(results[0].address, IsEmpty());
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, H1GoesOverTcpToTheDefaultPortWithoutARecord)
+{
+   site.dns().add_address("localhost", "127.0.0.1");
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.protocols = {.h1 = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h1 localhost:{}", site.port()));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, H3AndH2FallBackToTcpWhenAConnectionFails)
 {
    auto silent = silent_udp_socket();
 
@@ -1003,7 +1148,7 @@ TEST_F(Probe, H3OnlyStillFallsBackToTcpWhenAConnectionFails)
 
    auto configuration = config();
    configuration.timeout = 200ms;
-   configuration.h3_only = true;
+   configuration.protocols = {.h3 = true, .h2 = true};
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
@@ -1012,40 +1157,102 @@ TEST_F(Probe, H3OnlyStillFallsBackToTcpWhenAConnectionFails)
    EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
 
-TEST_F(Probe, H3OnlyStillSaysThatARecordLeadsElsewhere)
+namespace
 {
-   site.dns().add_https("localhost", 1, "elsewhere.example.test", h3_at(site.port()));
 
+//
+// A server over TLS that speaks HTTP/1.1 and nothing else, by ALPN, where the site's server takes
+// HTTP/2 whenever it is offered. It answers a request with a 204 and keeps what it was sent.
+//
+class Http1Server : public Probe
+{
+protected:
+   void SetUp() override
+   {
+      ASSERT_FALSE(tls.use_certificate_chain_file(site.ca_file().string()));
+      ASSERT_FALSE(
+         tls.use_private_key_file(site.key_file().string(), corosio::tls_file_format::pem));
+      ASSERT_FALSE(tls.set_alpn({"http/1.1"}));
+      capy::run_async(context.get_executor())(serve());
+
+      port = acceptor.local_endpoint().port(); // which is 0 once it is closed
+      site.dns().add_https("localhost", 1, ".", {alpn_h2, port_param(port)});
+   }
+
+   void stop_sites() override
+   {
+      site.stop();
+      acceptor.close();
+   }
+
+   capy::task<> serve()
+   {
+      for (;;)
+      {
+         corosio::tcp_socket socket(context);
+         if (auto [ec] = co_await acceptor.accept(socket); ec)
+            co_return;
+         ++connections;
+
+         corosio::openssl_stream stream(std::move(socket), tls);
+         if (auto [ec] = co_await stream.handshake(corosio::tls_role::server); ec)
+            continue;
+
+         std::string request;
+         std::array<char, 1024> buffer;
+         while (!request.contains("\r\n\r\n"))
+         {
+            auto [ec, n] = co_await stream.read_some(capy::make_buffer(buffer));
+            if (ec || n == 0)
+               break;
+            request.append(buffer.data(), n);
+         }
+         received += request;
+
+         if (request.contains("\r\n\r\n"))
+         {
+            constexpr std::string_view response =
+               "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+            std::ignore = co_await capy::write(stream, capy::make_buffer(response));
+         }
+         std::ignore = co_await stream.shutdown();
+      }
+   }
+
+   corosio::tcp_acceptor acceptor = silent_tcp_acceptor();
+   std::uint16_t port = 0;
+   corosio::tls_context tls;
+   std::string received; ///< all that came in over all connections, once decrypted
+   int connections = 0;
+};
+
+} // namespace
+
+TEST_F(Http1Server, H2DoesNotSendTheRequestToAServerThatChoosesHttp1)
+{
    auto configuration = config();
-   configuration.h3_only = true;
+   configuration.protocols = {.h2 = true};
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::out_of_reach);
-   EXPECT_THAT(site.requests(), IsEmpty());
+   EXPECT_EQ(results[0].outcome, Result::Outcome::failed);
+   EXPECT_THAT(results[0].error, HasSubstr("chose h1"));
+   EXPECT_GE(connections, 1);
+   EXPECT_THAT(received, IsEmpty());
 }
 
-TEST_F(Probe, H3OnlyStillSaysThatANameDoesNotExist)
+TEST_F(Http1Server, H2AndH1LetTheServerChooseHttp1)
 {
-   auto configuration = config({"nowhere.example.test"});
-   configuration.h3_only = true;
-   probe(std::move(configuration));
-
-   ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::not_found);
-}
-
-TEST_F(Probe, H3OnlyDoesNotTakeAFailedLookupForNoHttp3)
-{
-   site.dns().set_rcode(ARES_RCODE_SERVFAIL);
-
    auto configuration = config();
-   configuration.h3_only = true;
+   configuration.protocols = {.h2 = true, .h1 = true};
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 1u);
-   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
-   EXPECT_THAT(site.requests(), IsEmpty());
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].status, 204);
+   EXPECT_EQ(results[0].route, std::format("h1 localhost:{}", port));
+   EXPECT_THAT(received, testing::StartsWith("GET / HTTP/1.1\r\n"));
+   EXPECT_EQ(connections, 1);
 }
 
 // =================================================================================================
@@ -1146,7 +1353,7 @@ TEST_F(Probe, DnsOnlyStillSaysThatThereIsNoAddress)
    EXPECT_THAT(notes(results[0]), HasSubstr("address lookup"));
 }
 
-TEST_F(Probe, DnsOnlyGoesWithH3Only)
+TEST_F(Probe, DnsOnlyGoesWithH3)
 {
    site.dns().add_https("offers.example.test", 1, ".", h3_at(site.port()));
    site.dns().add_address("offers.example.test", "127.0.0.1");
@@ -1155,13 +1362,13 @@ TEST_F(Probe, DnsOnlyGoesWithH3Only)
 
    auto configuration = config({"offers.example.test", "lacks.example.test"});
    configuration.dns_only = true;
-   configuration.h3_only = true;
+   configuration.protocols = {.h3 = true};
    configuration.concurrency = 1;
    probe(std::move(configuration));
 
    ASSERT_EQ(results.size(), 2u);
    EXPECT_EQ(results[0].outcome, Result::Outcome::resolved) << notes(results[0]);
-   EXPECT_EQ(results[1].outcome, Result::Outcome::no_h3);
+   EXPECT_EQ(results[1].outcome, Result::Outcome::left_out);
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 
@@ -1193,6 +1400,30 @@ TEST_F(Probe, EachAddressSendsOneRequestToEachOfThem)
       EXPECT_THAT(reply.error, IsEmpty());
    }
    EXPECT_EQ(site.requests().size(), results[0].replies.size());
+}
+
+//
+// The server takes its time with each of them, so that one after the other, no request would arrive
+// before the response to the one before.
+//
+TEST_F(Probe, EachAddressAsksAllOfThemAtTheSameTime)
+{
+   constexpr auto delay = 400ms;
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .delay = delay});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   if (results[0].replies.size() < 2)
+      GTEST_SKIP() << "localhost has only one address here";
+   ASSERT_EQ(site.requests().size(), results[0].replies.size());
+   const auto [first, last] =
+      std::ranges::minmax(site.requests() | std::views::transform(&Site::Request::time));
+   EXPECT_LT(last - first, delay);
 }
 
 TEST_F(Probe, EachAddressGoesOverHttp3)
@@ -1241,7 +1472,10 @@ TEST_F(Probe, EachAddressReportsARedirectAndDoesNotFollowIt)
    EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
    ASSERT_THAT(results[0].replies, Not(IsEmpty()));
    for (const auto& reply : results[0].replies)
+   {
       EXPECT_EQ(reply.status, 301);
+      EXPECT_EQ(reply.location, "/elsewhere");
+   }
    EXPECT_THAT(site.targets(), testing::Each("/"));
    EXPECT_EQ(site.requests().size(), results[0].replies.size());
 }

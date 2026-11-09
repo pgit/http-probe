@@ -10,12 +10,11 @@
 #include <boost/url/parse.hpp>
 #include <boost/url/url.hpp>
 
-#include <spdlog/spdlog.h>
-
 #include <algorithm>
 #include <cctype>
 #include <exception>
 #include <format>
+#include <iterator>
 #include <optional>
 #include <ranges>
 #include <set>
@@ -35,6 +34,17 @@ namespace
 constexpr std::string_view user_agent = "http-probe/0.0.1 (+https://github.com/pgit/http-probe)";
 
 constexpr int max_alias_chain = 8;
+
+//
+// Where a redirect points, as the server put it: nothing is resolved against the URL that was
+// asked for, and nothing is requested. Empty for anything but a redirect.
+//
+std::string redirect_location(const anyhttp::client::Message& message)
+{
+   const auto status = message.result_int();
+   return status >= 300 && status < 400 ? std::string(message[http::field::location])
+                                        : std::string();
+}
 
 //
 // The resolver does not write anywhere by itself. Its messages go where our own go.
@@ -99,7 +109,7 @@ std::optional<ServerName> server_name(std::string_view server)
        (!port.empty() && (port.size() == 1 || !std::ranges::all_of(port.substr(1), is_digit))))
       return std::nullopt;
 
-   return ServerName{name, port};
+   return ServerName{.name = name, .port = port};
 }
 
 //
@@ -181,7 +191,7 @@ void prefer_ipv6(std::vector<corosio::endpoint>& addresses)
    std::ranges::stable_partition(addresses, &corosio::endpoint::is_v6);
 }
 
-Prober::Prober(capy::any_executor executor, Config config, Observer observer)
+Prober::Prober(const capy::any_executor& executor, Config config, Observer observer)
    : executor_(executor), config_(std::move(config)), observer_(std::move(observer))
 {
    if (config_.hosts.empty())
@@ -354,22 +364,16 @@ capy::task<Result> Prober::probe(const std::string& host)
    result.aliased = found.aliased;
    result.records = found.records;
 
-   const auto plan = plan_routes(host, found, config_.default_port);
+   const auto plan = plan_routes(host, found, config_.protocols, config_.default_port);
    result.notes = plan.rejected;
    for (const auto& rejected : plan.rejected)
       config_.logger->debug("{}: rejected: {}", host, rejected);
-
-   if (config_.h3_only && !found.lookup_failed && !found.not_found && !has_h3_record(found))
-   {
-      config_.logger->debug("{}: left out, no record offers HTTP/3", host);
-      result.outcome = Result::Outcome::no_h3;
-      co_return result;
-   }
 
    if (plan.routes.empty())
    {
       result.outcome = found.lookup_failed ? Result::Outcome::lookup_failed
                        : found.not_found   ? Result::Outcome::not_found
+                       : plan.left_out     ? Result::Outcome::left_out
                                            : Result::Outcome::out_of_reach;
       co_return result;
    }
@@ -403,16 +407,31 @@ capy::task<Result> Prober::probe(const std::string& host)
       co_return result;
    }
 
+   //
+   // All addresses at the same time, as each of them gets a request of its own anyway, so that a
+   // host takes as long as its slowest address and not as long as all of them together. The replies
+   // and the notes are in the order of the addresses all the same.
+   //
    if (config_.each_address)
    {
+      std::vector<std::vector<std::string>> notes(addresses.size());
+      std::vector<capy::task<capy::results<AddressReply>>> asks;
+      asks.reserve(addresses.size());
+      for (std::size_t i = 0; i < addresses.size(); ++i)
+         asks.push_back(ask_address(plan.routes, host, addresses[i], notes[i]));
+
+      auto [ec, replies] = co_await capy::when_all(std::move(asks));
+      if (ec) // never, see ask_address()
+         throw std::logic_error(std::format("{}: {}", host, ec.message()));
+
       result.outcome = Result::Outcome::answered;
-      for (const auto& address : addresses)
+      for (std::size_t i = 0; i < replies.size(); ++i)
       {
-         auto reply = co_await ask_address(plan.routes, host, address, result.notes);
-         if (!reply.error.empty())
+         if (!replies[i].error.empty())
             result.outcome = Result::Outcome::failed;
-         result.replies.push_back(std::move(reply));
+         std::ranges::move(notes[i], std::back_inserter(result.notes));
       }
+      result.replies = std::move(replies);
       co_return result;
    }
 
@@ -442,6 +461,7 @@ capy::task<Result> Prober::probe(const std::string& host)
          result.outcome = Result::Outcome::answered;
          result.error.clear();
          result.status = static_cast<int>(response.message.result_int());
+         result.location = redirect_location(response.message);
          auto spoken = route;
          spoken.protocol = response.protocol;
          result.route = spoken.to_string();
@@ -459,10 +479,13 @@ capy::task<Result> Prober::probe(const std::string& host)
 // One request to one address: the next route is for a connection that did not come about, and once
 // a request has gone out, that was it for this address, however it ended.
 //
-capy::task<AddressReply> Prober::ask_address(const std::vector<Route>& routes,
-                                             const std::string& host,
-                                             const corosio::endpoint& address,
-                                             std::vector<std::string>& notes)
+// What went wrong is in the reply, and the error code always success: when_all() would take one
+// for a reason to stop the others, which have nothing to do with this address.
+//
+capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Route>& routes,
+                                                            const std::string& host,
+                                                            const corosio::endpoint& address,
+                                                            std::vector<std::string>& notes)
 {
    AddressReply reply{.address = address.address().to_string()};
    for (const auto& route : routes)
@@ -476,17 +499,18 @@ capy::task<AddressReply> Prober::ask_address(const std::vector<Route>& routes,
       {
          reply.status = static_cast<int>(response.message.result_int());
          reply.reason = response.message.reason();
+         reply.location = redirect_location(response.message);
          reply.error.clear();
-         co_return reply;
+         co_return {std::error_code(), std::move(reply)};
       }
 
       reply.error = std::format("[{}] {}", route.to_string(), response.error);
       notes.push_back(std::format("{} at {}", reply.error, reply.address));
       config_.logger->debug("{}: {} at {}", host, reply.error, reply.address);
       if (response.request_sent)
-         co_return reply;
+         break;
    }
-   co_return reply;
+   co_return {std::error_code(), std::move(reply)};
 }
 
 //
@@ -558,6 +582,20 @@ capy::task<capy::results<Prober::Response>> Prober::exchange(anyhttp::client::Cl
                     Response{.error = std::format("connect: {}", connect_ec.message())}};
 
       session = std::move(connected);
+
+      //
+      // anyhttp's h2 offers HTTP/1.1 as well, and a server that does not use ALPN at all gets it,
+      // too. Where that is not one to speak, nothing is asked, and this counts as a connection that
+      // failed, for the next address or route to have a go.
+      //
+      if (const auto protocol = session.protocol(); !config_.protocols.speaks(protocol))
+      {
+         if (auto [shutdown_ec] = co_await session.shutdown(); shutdown_ec)
+            config_.logger->debug("{}: shutdown: {}", url.host(), shutdown_ec.message());
+         co_return {std::make_error_code(std::errc::protocol_not_supported),
+                    Response{.error = std::format("connect: the server chose {}, so no request",
+                                                  protocol_name(protocol))}};
+      }
 
       anyhttp::Fields headers;
       headers.set(http::field::user_agent, user_agent);
