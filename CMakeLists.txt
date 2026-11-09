@@ -27,7 +27,9 @@ endif()
 #
 # I/O runtime: Capy and Corosio, and only those. The libraries take either, which is their business:
 # this is a program, and it gets to decide. These shadow the cache entries of the libraries, which
-# go on saying ASIO in CMakeCache.txt.
+# go on saying ASIO in CMakeCache.txt. c-ares-async is headers, and its runtime is the target a
+# program links, c_ares_async::corosio here; its option only has it look for Corosio rather than
+# insist on Asio.
 #
 set(ANYHTTP_API COROSIO)
 set(C_ARES_ASYNC_API ${ANYHTTP_API})
@@ -52,12 +54,12 @@ FetchContent_Declare(anyhttp
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
-    GIT_TAG 6d46c6c8e65231f23a250bcec5dd00b3a1d9ba34
+    GIT_TAG 2bbeb48fcd7ca539fc1c6f3fc580984cde7ada4b
     SYSTEM)
 
 #
 # Both libraries pin these as well. The first declaration wins, so these are the ones both of them
-# get, and here they are SYSTEM, too. They follow anyhttp's pins, which c-ares-async's lag behind.
+# get, and here they are SYSTEM, too. They are anyhttp's pins, and c-ares-async has the same.
 #
 FetchContent_Declare(capy
     GIT_REPOSITORY https://github.com/cppalliance/capy.git
@@ -85,7 +87,7 @@ set(http_probe_warnings -Wall -Wextra -Werror -Wno-missing-designated-field-init
 
 add_library(http_probe_core STATIC src/output.cpp src/prober.cpp src/routes.cpp)
 target_include_directories(http_probe_core PUBLIC src)
-target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::c_ares_async)
+target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::corosio)
 target_compile_options(http_probe_core PRIVATE ${http_probe_warnings})
 
 add_executable(http-probe src/main.cpp)

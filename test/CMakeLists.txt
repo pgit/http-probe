@@ -21,7 +21,7 @@ add_library(
     fake_dns STATIC ${c_ares_async_SOURCE_DIR}/test/fake_dns_server.cpp
                     ${c_ares_async_SOURCE_DIR}/test/test_certificate.cpp)
 target_include_directories(fake_dns SYSTEM PUBLIC ${c_ares_async_SOURCE_DIR}/test)
-target_link_libraries(fake_dns PUBLIC c_ares_async::c_ares_async anyhttp::anyhttp OpenSSL::SSL
+target_link_libraries(fake_dns PUBLIC c_ares_async::corosio anyhttp::anyhttp OpenSSL::SSL
                                       OpenSSL::Crypto)
 
 add_library(test_site STATIC site.cpp)
