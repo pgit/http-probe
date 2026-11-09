@@ -6,7 +6,12 @@
 
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/corosio/io_context.hpp>
-#include <boost/program_options.hpp>
+#include <boost/program_options/errors.hpp>
+#include <boost/program_options/options_description.hpp>
+#include <boost/program_options/parsers.hpp>
+#include <boost/program_options/positional_options.hpp>
+#include <boost/program_options/value_semantic.hpp>
+#include <boost/program_options/variables_map.hpp>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -192,7 +197,7 @@ void print_usage(std::ostream& out, const po::options_description& options)
        << wrap(exit_code, columns) << '\n';
 }
 
-void parse_arguments(int argc, char* argv[], const po::options_description& options,
+void parse_arguments(int argc, char** argv, const po::options_description& options,
                      Arguments& arguments)
 {
    try
@@ -314,7 +319,7 @@ int main(int argc, char* argv[])
          if (all || (result.outcome != Outcome::not_found && result.outcome != Outcome::left_out))
          {
             std::print("{}", http_probe::format_result(result, color_results));
-            std::fflush(stdout); // a run can take a while, and it is worth watching
+            std::ignore = std::fflush(stdout); // a run can take a while, and it is worth watching
          }
       };
 
@@ -326,9 +331,9 @@ int main(int argc, char* argv[])
       // What a handler throws ends the process, so this one leaves it for after run().
       //
       boost::capy::run_async(
-         context.get_executor(), []() noexcept {},
+         context.get_executor(), [] noexcept {},
          [&](std::exception_ptr ex) noexcept {
-            failed = ex;
+            failed = std::move(ex);
             context.stop();
          })(prober.run());
       if (verbosity >= 2)

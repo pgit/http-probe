@@ -167,7 +167,7 @@ public:
    /// Throws \c std::invalid_argument for a configuration that is not good to go, and does nothing
    /// else until run(), which has more to say about the DNS servers: the same for a list that can't
    /// be used, and \c std::runtime_error for a host name in it that can't be looked up.
-   Prober(capy::any_executor executor, Config config, Observer observer);
+   Prober(const capy::any_executor& executor, Config config, Observer observer);
 
    capy::task<> run();
 

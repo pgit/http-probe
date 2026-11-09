@@ -62,7 +62,7 @@ namespace boost::corosio
 {
 
 /// What a failed expectation shows of an endpoint: Corosio has no output operator for one.
-inline void PrintTo(const endpoint& endpoint, std::ostream* out)
+static void PrintTo(const endpoint& endpoint, std::ostream* out)
 {
    *out << endpoint.address() << ':' << endpoint.port();
 }
@@ -82,15 +82,17 @@ corosio::ip_address make_address(std::string_view text)
 
 fake_dns_server::svc_param port_param(std::uint16_t port)
 {
-   return {ARES_SVCB_PARAM_PORT,
-           {static_cast<unsigned char>(port >> 8), static_cast<unsigned char>(port & 0xff)}};
+   return {
+      .key = ARES_SVCB_PARAM_PORT,
+      .value = {static_cast<unsigned char>(port >> 8), static_cast<unsigned char>(port & 0xff)}};
 }
 
-const fake_dns_server::svc_param alpn_h3{ARES_SVCB_PARAM_ALPN, {2, 'h', '3'}};
-const fake_dns_server::svc_param alpn_h2{ARES_SVCB_PARAM_ALPN, {2, 'h', '2'}};
-const fake_dns_server::svc_param alpn_h1{ARES_SVCB_PARAM_ALPN,
-                                         {8, 'h', 't', 't', 'p', '/', '1', '.', '1'}};
-const fake_dns_server::svc_param no_default_alpn{ARES_SVCB_PARAM_NO_DEFAULT_ALPN, {}};
+const fake_dns_server::svc_param alpn_h3{.key = ARES_SVCB_PARAM_ALPN, .value = {2, 'h', '3'}};
+const fake_dns_server::svc_param alpn_h2{.key = ARES_SVCB_PARAM_ALPN, .value = {2, 'h', '2'}};
+const fake_dns_server::svc_param alpn_h1{.key = ARES_SVCB_PARAM_ALPN,
+                                         .value = {8, 'h', 't', 't', 'p', '/', '1', '.', '1'}};
+const fake_dns_server::svc_param no_default_alpn{.key = ARES_SVCB_PARAM_NO_DEFAULT_ALPN,
+                                                 .value = {}};
 
 //
 // One protocol and no other, for a test to know which one it is getting. A record with nothing but
@@ -125,16 +127,16 @@ protected:
       //
       // In a variable: the coroutine refers to what the lambda captured, for as long as it runs.
       //
-      const auto run = [&]() -> capy::task<> {
+      const auto run = [&] -> capy::task<> {
          co_await prober.run();
          stop_sites();
       };
 
       std::exception_ptr failed;
       capy::run_async(
-         context.get_executor(), []() noexcept {},
+         context.get_executor(), [] noexcept {},
          [&](std::exception_ptr ex) noexcept {
-            failed = ex;
+            failed = std::move(ex);
             context.stop();
          })(run());
       context.run();
@@ -157,7 +159,7 @@ protected:
 
    corosio::tcp_acceptor silent_tcp_acceptor()
    {
-      return corosio::tcp_acceptor(context, {corosio::ipv6_address::any(), 0});
+      return {context, {corosio::ipv6_address::any(), 0}};
    }
 
    //
@@ -701,7 +703,7 @@ TEST_F(Probe, TriesIPv6First)
    EXPECT_EQ(results[0].address, "127.0.0.1"); // the last one tried
 }
 
-corosio::endpoint at(const char* address) { return {make_address(address), 443}; }
+static corosio::endpoint at(const char* address) { return {make_address(address), 443}; }
 
 TEST(PreferIpv6, MovesIPv6ToTheFrontAndKeepsTheOrderWithinEachFamily)
 {
@@ -1075,7 +1077,8 @@ TEST_F(Probe, H3DoesNotTakeAFailedLookupForNoHttp3)
 
 TEST_F(Probe, H2SpeaksNothingElseThatTheRecordOffers)
 {
-   const fake_dns_server::svc_param alpn_h3_h2{ARES_SVCB_PARAM_ALPN, {2, 'h', '3', 2, 'h', '2'}};
+   const fake_dns_server::svc_param alpn_h3_h2{.key = ARES_SVCB_PARAM_ALPN,
+                                               .value = {2, 'h', '3', 2, 'h', '2'}};
    site.dns().add_https("localhost", 1, ".", {alpn_h3_h2, port_param(site.port())});
    site.page("/", {.body = "hello"});
 

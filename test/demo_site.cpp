@@ -32,16 +32,16 @@ int main()
    http_probe::test::Site site(context.get_executor());
 
    site.dns().add_https("localhost", 1, ".",
-                        {{ARES_SVCB_PARAM_ALPN, {2, 'h', '3'}},
-                         {ARES_SVCB_PARAM_PORT,
-                          {static_cast<unsigned char>(site.port() >> 8),
-                           static_cast<unsigned char>(site.port() & 0xff)}}});
+                        {{.key = ARES_SVCB_PARAM_ALPN, .value = {2, 'h', '3'}},
+                         {.key = ARES_SVCB_PARAM_PORT,
+                          .value = {static_cast<unsigned char>(site.port() >> 8),
+                                    static_cast<unsigned char>(site.port() & 0xff)}}});
 
    site.page("/", {.body = "<p>hello</p>"});
 
    std::println("http-probe --dns-server {} --ca-file {} localhost", site.dns_address(),
                 site.ca_file().string());
-   std::fflush(stdout);
+   (void)std::fflush(stdout);
 
    corosio::signal_set signals(context, SIGINT, SIGTERM);
    capy::run_async(context.get_executor())(stop_on_signal(signals, site));

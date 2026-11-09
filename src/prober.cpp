@@ -10,8 +10,6 @@
 #include <boost/url/parse.hpp>
 #include <boost/url/url.hpp>
 
-#include <spdlog/spdlog.h>
-
 #include <algorithm>
 #include <cctype>
 #include <exception>
@@ -111,7 +109,7 @@ std::optional<ServerName> server_name(std::string_view server)
        (!port.empty() && (port.size() == 1 || !std::ranges::all_of(port.substr(1), is_digit))))
       return std::nullopt;
 
-   return ServerName{name, port};
+   return ServerName{.name = name, .port = port};
 }
 
 //
@@ -193,7 +191,7 @@ void prefer_ipv6(std::vector<corosio::endpoint>& addresses)
    std::ranges::stable_partition(addresses, &corosio::endpoint::is_v6);
 }
 
-Prober::Prober(capy::any_executor executor, Config config, Observer observer)
+Prober::Prober(const capy::any_executor& executor, Config config, Observer observer)
    : executor_(executor), config_(std::move(config)), observer_(std::move(observer))
 {
    if (config_.hosts.empty())
@@ -418,6 +416,7 @@ capy::task<Result> Prober::probe(const std::string& host)
    {
       std::vector<std::vector<std::string>> notes(addresses.size());
       std::vector<capy::task<capy::results<AddressReply>>> asks;
+      asks.reserve(addresses.size());
       for (std::size_t i = 0; i < addresses.size(); ++i)
          asks.push_back(ask_address(plan.routes, host, addresses[i], notes[i]));
 

@@ -29,6 +29,7 @@ ServiceRecords found(std::vector<c_ares_async::https_record> records,
 std::vector<std::string> routes(const Plan& plan)
 {
    std::vector<std::string> result;
+   result.reserve(plan.routes.size());
    for (const auto& route : plan.routes)
       result.push_back(route.to_string());
    return result;
@@ -292,7 +293,7 @@ TEST(Plan, TreatsARecordWithAnInvalidPortAsNoRecord)
 TEST(Plan, PassesOnWhatWentWrongInTheLookup)
 {
    auto records = found({});
-   records.notes.push_back("HTTPS lookup failed");
+   records.notes.emplace_back("HTTPS lookup failed");
 
    EXPECT_THAT(plan_routes("example.com", records).rejected.front(), "HTTPS lookup failed");
 }
