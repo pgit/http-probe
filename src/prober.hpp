@@ -75,8 +75,9 @@ struct Config
    /// connect to nothing. See Result::Outcome::resolved.
    bool dns_only = false;
 
-   /// Send a request to each address of a host, one at a time, rather than to the first that can be
-   /// connected to. Config::timeout then is per address on each route. See Result::replies.
+   /// Send a request to each address of a host, all of them at the same time, rather than to the
+   /// first that can be connected to. Config::timeout then is per address on each route. See
+   /// Result::replies.
    bool each_address = false;
 
    /// Where the messages of this program and of c-ares go. anyhttp can't be told: it always uses
@@ -148,7 +149,8 @@ struct Result
  * and nothing else on the host is requested. The next route is for a connection that did not come
  * about: once a request has gone out, that was it for this host, however it ended. With
  * Config::dns_only, it is the lookups and nothing else. With Config::each_address, all of this goes
- * for each address of the host instead of for the host: one request per address, in order.
+ * for each address of the host instead of for the host: one request per address, to all of them at
+ * the same time, with the replies in the order of the addresses.
  *
  * Hosts are worked on Config::concurrency at a time, so results arrive as they are ready. All of
  * this is on the one executor, which is also what calls the observer.
@@ -179,9 +181,10 @@ private:
    capy::task<capy::results<>> work();
    capy::task<ServiceRecords> resolve_service(const std::string& host);
    capy::task<Result> probe(const std::string& host);
-   capy::task<AddressReply> ask_address(const std::vector<Route>& routes, const std::string& host,
-                                        const corosio::endpoint& address,
-                                        std::vector<std::string>& notes);
+   capy::task<capy::results<AddressReply>> ask_address(const std::vector<Route>& routes,
+                                                       const std::string& host,
+                                                       const corosio::endpoint& address,
+                                                       std::vector<std::string>& notes);
    capy::task<capy::results<Response>> attempt(const Route& route, const std::string& host,
                                                const corosio::endpoint& endpoint,
                                                std::chrono::steady_clock::time_point deadline);

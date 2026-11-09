@@ -16,6 +16,7 @@
 #include <cctype>
 #include <exception>
 #include <format>
+#include <iterator>
 #include <optional>
 #include <ranges>
 #include <set>
@@ -397,16 +398,30 @@ capy::task<Result> Prober::probe(const std::string& host)
       co_return result;
    }
 
+   //
+   // All addresses at the same time, as each of them gets a request of its own anyway, so that a
+   // host takes as long as its slowest address and not as long as all of them together. The replies
+   // and the notes are in the order of the addresses all the same.
+   //
    if (config_.each_address)
    {
+      std::vector<std::vector<std::string>> notes(addresses.size());
+      std::vector<capy::task<capy::results<AddressReply>>> asks;
+      for (std::size_t i = 0; i < addresses.size(); ++i)
+         asks.push_back(ask_address(plan.routes, host, addresses[i], notes[i]));
+
+      auto [ec, replies] = co_await capy::when_all(std::move(asks));
+      if (ec) // never, see ask_address()
+         throw std::logic_error(std::format("{}: {}", host, ec.message()));
+
       result.outcome = Result::Outcome::answered;
-      for (const auto& address : addresses)
+      for (std::size_t i = 0; i < replies.size(); ++i)
       {
-         auto reply = co_await ask_address(plan.routes, host, address, result.notes);
-         if (!reply.error.empty())
+         if (!replies[i].error.empty())
             result.outcome = Result::Outcome::failed;
-         result.replies.push_back(std::move(reply));
+         std::ranges::move(notes[i], std::back_inserter(result.notes));
       }
+      result.replies = std::move(replies);
       co_return result;
    }
 
@@ -453,10 +468,13 @@ capy::task<Result> Prober::probe(const std::string& host)
 // One request to one address: the next route is for a connection that did not come about, and once
 // a request has gone out, that was it for this address, however it ended.
 //
-capy::task<AddressReply> Prober::ask_address(const std::vector<Route>& routes,
-                                             const std::string& host,
-                                             const corosio::endpoint& address,
-                                             std::vector<std::string>& notes)
+// What went wrong is in the reply, and the error code always success: when_all() would take one
+// for a reason to stop the others, which have nothing to do with this address.
+//
+capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Route>& routes,
+                                                            const std::string& host,
+                                                            const corosio::endpoint& address,
+                                                            std::vector<std::string>& notes)
 {
    AddressReply reply{.address = address.address().to_string()};
    for (const auto& route : routes)
@@ -471,16 +489,16 @@ capy::task<AddressReply> Prober::ask_address(const std::vector<Route>& routes,
          reply.status = static_cast<int>(response.message.result_int());
          reply.reason = response.message.reason();
          reply.error.clear();
-         co_return reply;
+         co_return {std::error_code(), std::move(reply)};
       }
 
       reply.error = std::format("[{}] {}", route.to_string(), response.error);
       notes.push_back(std::format("{} at {}", reply.error, reply.address));
       config_.logger->debug("{}: {} at {}", host, reply.error, reply.address);
       if (response.request_sent)
-         co_return reply;
+         break;
    }
-   co_return reply;
+   co_return {std::error_code(), std::move(reply)};
 }
 
 //

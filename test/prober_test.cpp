@@ -26,6 +26,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -36,6 +37,7 @@
 #include <fstream>
 #include <memory>
 #include <ostream>
+#include <ranges>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -1379,6 +1381,30 @@ TEST_F(Probe, EachAddressSendsOneRequestToEachOfThem)
       EXPECT_THAT(reply.error, IsEmpty());
    }
    EXPECT_EQ(site.requests().size(), results[0].replies.size());
+}
+
+//
+// The server takes its time with each of them, so that one after the other, no request would arrive
+// before the response to the one before.
+//
+TEST_F(Probe, EachAddressAsksAllOfThemAtTheSameTime)
+{
+   constexpr auto delay = 400ms;
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .delay = delay});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   if (results[0].replies.size() < 2)
+      GTEST_SKIP() << "localhost has only one address here";
+   ASSERT_EQ(site.requests().size(), results[0].replies.size());
+   const auto [first, last] =
+      std::ranges::minmax(site.requests() | std::views::transform(&Site::Request::time));
+   EXPECT_LT(last - first, delay);
 }
 
 TEST_F(Probe, EachAddressGoesOverHttp3)

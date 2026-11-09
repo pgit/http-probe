@@ -87,7 +87,9 @@ example.com: answered
 
 All other hosts get the outcome they always get. A host counts as `answered` only if all of its
 addresses did, whatever the status, and otherwise as `failed`. This is the one exception to one request
-per host, and it can't go with `--dns-only`. `--timeout-ms` then is per address on each route. Beyond
+per host, and it can't go with `--dns-only`. The addresses are all asked at the same time, so a host
+takes as long as its slowest address, and they are printed in the order of trying them all the same.
+`--timeout-ms` then is per address on each route. Beyond
 that, the next paragraph holds for each address, and nothing is followed here either. HTTP/2 and HTTP/3
 have no reason phrase, so there the `OK` is what that status is called.
 
