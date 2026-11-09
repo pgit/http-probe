@@ -1397,6 +1397,7 @@ TEST_F(Probe, EachAddressSendsOneRequestToEachOfThem)
       EXPECT_THAT(reply.address, Not(IsEmpty()));
       EXPECT_EQ(reply.status, 200);
       EXPECT_EQ(reply.reason, "OK");
+      EXPECT_THAT(reply.fields, Contains(Pair("content-type", "text/html")));
       EXPECT_THAT(reply.error, IsEmpty());
    }
    EXPECT_EQ(site.requests().size(), results[0].replies.size());

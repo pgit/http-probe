@@ -34,21 +34,66 @@ Result answered(int status = 200)
 
 TEST(Output, SaysWhatCameBack)
 {
-   EXPECT_EQ(format_result(answered(), false),
+   EXPECT_EQ(format_result(answered(), {}),
+             "example.com: 200 [h3 example.com:443] at 192.0.2.1, 5 bytes in 12ms\n"
+             "  record: HTTPS 1 . alpn=h3 ipv4hint=192.0.2.1 ipv6hint=2001:db8::1\n");
+}
+
+TEST(Output, HasTheHeaderFieldsOnlyWithAllHeaders)
+{
+   auto result = answered();
+   result.fields = {{"server", "test"}, {"content-type", "text/html"}};
+   result.notes = {"some note"};
+
+   EXPECT_EQ(format_result(result, {.all_headers = true}),
              "example.com: 200 [h3 example.com:443] at 192.0.2.1, 5 bytes in 12ms\n"
              "  record: HTTPS 1 . alpn=h3 ipv4hint=192.0.2.1 ipv6hint=2001:db8::1\n"
-             "  server: test\n");
+             "  note: some note\n"
+             "  server: test\n"
+             "  content-type: text/html\n");
+   EXPECT_THAT(format_result(result, {}), Not(HasSubstr("server")));
+
+   EXPECT_THAT(format_result(result, {.color = true, .all_headers = true}),
+               HasSubstr("  \x1b[1;34mserver\x1b[0m: test\n"));
+}
+
+TEST(Output, HasTheHeaderFieldsOfEachAddressWithAllHeaders)
+{
+   const Result result{
+      .host = "example.com",
+      .outcome = Outcome::failed,
+      .replies = {{.address = "2001:db8::1", .status = 200, .fields = {{"server", "a"}}},
+                  {.address = "192.0.2.1", .error = "[h2 x:443] connect: no"},
+                  {.address = "192.0.2.2",
+                   .status = 301,
+                   .location = "/b",
+                   .fields = {{"server", "c"}, {"location", "/b"}}}},
+      .notes = {"[h2 x:443] connect: no at 192.0.2.1"}};
+
+   EXPECT_EQ(format_result(result, {.all_headers = true}),
+             "example.com: failed\n"
+             "  address: 2001:db8::1 200\n"
+             "    server: a\n"
+             "  address: 192.0.2.1 failed: [h2 x:443] connect: no\n"
+             "  address: 192.0.2.2 301 -> /b\n"
+             "    server: c\n"
+             "    location: /b\n"
+             "  note: [h2 x:443] connect: no at 192.0.2.1\n");
+   EXPECT_EQ(format_result(result, {}), "example.com: failed\n"
+                                        "  address: 2001:db8::1 200\n"
+                                        "  address: 192.0.2.1 failed: [h2 x:443] connect: no\n"
+                                        "  address: 192.0.2.2 301 -> /b\n"
+                                        "  note: [h2 x:443] connect: no at 192.0.2.1\n");
 }
 
 TEST(Output, SaysWhereARedirectPoints)
 {
    auto result = answered(301);
    result.location = "https://www.example.com/";
-   EXPECT_EQ(format_result(result, false),
+   EXPECT_EQ(format_result(result, {}),
              "example.com: 301 [h3 example.com:443] at 192.0.2.1, 5 bytes in 12ms"
              " -> https://www.example.com/\n"
-             "  record: HTTPS 1 . alpn=h3 ipv4hint=192.0.2.1 ipv6hint=2001:db8::1\n"
-             "  server: test\n");
+             "  record: HTTPS 1 . alpn=h3 ipv4hint=192.0.2.1 ipv6hint=2001:db8::1\n");
 }
 
 TEST(Output, SaysWhereARedirectPointsForEachAddress)
@@ -59,9 +104,9 @@ TEST(Output, SaysWhereARedirectPointsForEachAddress)
       .replies = {{.address = "2001:db8::1", .status = 308, .location = "/elsewhere"},
                   {.address = "192.0.2.1", .status = 301, .reason = "Moved", .location = "/b"}}};
 
-   EXPECT_EQ(format_result(result, false), "example.com: answered\n"
-                                           "  address: 2001:db8::1 308 -> /elsewhere\n"
-                                           "  address: 192.0.2.1 301 Moved -> /b\n");
+   EXPECT_EQ(format_result(result, {}), "example.com: answered\n"
+                                        "  address: 2001:db8::1 308 -> /elsewhere\n"
+                                        "  address: 192.0.2.1 301 Moved -> /b\n");
 }
 
 TEST(Output, SaysWhichAddressFailed)
@@ -70,17 +115,17 @@ TEST(Output, SaysWhichAddressFailed)
                             .outcome = Outcome::failed,
                             .address = "2001:db8::1",
                             .error = "[h3 example.com:443] timed out"},
-                           false),
+                           {}),
              "example.com: failed at 2001:db8::1: [h3 example.com:443] timed out\n");
 }
 
 TEST(Output, ColoursAnAddressByItsFamily)
 {
    auto result = answered();
-   EXPECT_THAT(format_result(result, true), HasSubstr("at \x1b[35m192.0.2.1\x1b[0m,"));
+   EXPECT_THAT(format_result(result, {.color = true}), HasSubstr("at \x1b[35m192.0.2.1\x1b[0m,"));
 
    result.address = "2001:db8::1";
-   EXPECT_THAT(format_result(result, true), HasSubstr("at \x1b[34m2001:db8::1\x1b[0m,"));
+   EXPECT_THAT(format_result(result, {.color = true}), HasSubstr("at \x1b[34m2001:db8::1\x1b[0m,"));
 }
 
 TEST(Output, SaysWhyThereIsNoResponse)
@@ -89,19 +134,19 @@ TEST(Output, SaysWhyThereIsNoResponse)
                             .outcome = Outcome::failed,
                             .error = "[h3 example.com:443] timed out",
                             .notes = {"some note"}},
-                           false),
+                           {}),
              "example.com: failed: [h3 example.com:443] timed out\n  note: some note\n");
-   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::out_of_reach}, false),
+   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::out_of_reach}, {}),
              "example.com: out of reach\n");
-   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::not_found}, false),
+   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::not_found}, {}),
              "example.com: not found\n");
-   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::lookup_failed}, false),
+   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::lookup_failed}, {}),
              "example.com: lookup failed\n");
 }
 
 TEST(Output, SaysThatAHostWasLeftOut)
 {
-   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::left_out}, false),
+   EXPECT_EQ(format_result({.host = "example.com", .outcome = Outcome::left_out}, {}),
              "example.com: left out\n");
 }
 
@@ -119,12 +164,12 @@ TEST(Output, ListsTheAddressesOfAHostThatWasOnlyLookedUp)
                        .records = {{.priority = 1, .target = ".", .params = {"alpn=h3"}}},
                        .addresses = {"2001:db8::1", "192.0.2.1"}};
 
-   EXPECT_EQ(format_result(result, false), "example.com: resolved\n"
-                                           "  record: HTTPS 1 . alpn=h3\n"
-                                           "  address: 2001:db8::1\n"
-                                           "  address: 192.0.2.1\n");
+   EXPECT_EQ(format_result(result, {}), "example.com: resolved\n"
+                                        "  record: HTTPS 1 . alpn=h3\n"
+                                        "  address: 2001:db8::1\n"
+                                        "  address: 192.0.2.1\n");
 
-   const auto text = format_result(result, true);
+   const auto text = format_result(result, {.color = true});
    EXPECT_THAT(text, HasSubstr("\x1b[32mresolved\x1b[0m"));
    EXPECT_THAT(text, HasSubstr("address: \x1b[34m2001:db8::1\x1b[0m"));
    EXPECT_THAT(text, HasSubstr("address: \x1b[35m192.0.2.1\x1b[0m"));
@@ -147,13 +192,13 @@ TEST(Output, HasALinePerAddressWithARequestToEach)
                                    {.address = "192.0.2.1", .status = 299},
                                    {.address = "192.0.2.2", .error = "[h2 x:443] connect: no"}}};
 
-   EXPECT_EQ(format_result(result, false), "example.com: failed\n"
-                                           "  record: HTTPS 1 . alpn=h2\n"
-                                           "  address: 2001:db8::1 200 OK\n"
-                                           "  address: 192.0.2.1 299\n"
-                                           "  address: 192.0.2.2 failed: [h2 x:443] connect: no\n");
+   EXPECT_EQ(format_result(result, {}), "example.com: failed\n"
+                                        "  record: HTTPS 1 . alpn=h2\n"
+                                        "  address: 2001:db8::1 200 OK\n"
+                                        "  address: 192.0.2.1 299\n"
+                                        "  address: 192.0.2.2 failed: [h2 x:443] connect: no\n");
 
-   const auto text = format_result(result, true);
+   const auto text = format_result(result, {.color = true});
    EXPECT_THAT(text, HasSubstr("address: \x1b[34m2001:db8::1\x1b[0m \x1b[32m200\x1b[0m OK"));
    EXPECT_THAT(text, HasSubstr("\x1b[31mfailed\x1b[0m: [h2 x:443]"));
 }
@@ -164,13 +209,13 @@ TEST(Output, SaysThatAllAddressesAnswered)
                        .outcome = Outcome::answered,
                        .replies = {{.address = "192.0.2.1", .status = 301, .reason = "Moved"}}};
 
-   EXPECT_EQ(format_result(result, false), "example.com: answered\n"
-                                           "  address: 192.0.2.1 301 Moved\n");
+   EXPECT_EQ(format_result(result, {}), "example.com: answered\n"
+                                        "  address: 192.0.2.1 301 Moved\n");
 }
 
 TEST(Output, ColoursTheWayCAresAsyncDoes)
 {
-   const auto text = format_result(answered(), true);
+   const auto text = format_result(answered(), {.color = true});
 
    EXPECT_THAT(text, HasSubstr("\x1b[33mexample.com\x1b[0m:")) << "host names are yellow";
    EXPECT_THAT(text, HasSubstr("ipv4hint=\x1b[35m192.0.2.1\x1b[0m")) << "IPv4 is magenta";
@@ -182,11 +227,11 @@ TEST(Output, LeavesTheCommasOfAnAddressListWithoutColour)
    auto result = answered();
    result.records[0].params = {"ipv4hint=192.0.2.1,192.0.2.2", "ipv6hint=2001:db8::1,2001:db8::2"};
 
-   const auto text = format_result(result, true);
+   const auto text = format_result(result, {.color = true});
    EXPECT_THAT(text, HasSubstr("ipv4hint=\x1b[35m192.0.2.1\x1b[0m,\x1b[35m192.0.2.2\x1b[0m"));
    EXPECT_THAT(text, HasSubstr("ipv6hint=\x1b[34m2001:db8::1\x1b[0m,\x1b[34m2001:db8::2\x1b[0m"));
 
-   EXPECT_THAT(format_result(result, false),
+   EXPECT_THAT(format_result(result, {}),
                HasSubstr("ipv4hint=192.0.2.1,192.0.2.2 ipv6hint=2001:db8::1,2001:db8::2"));
 }
 
@@ -195,16 +240,16 @@ TEST(Output, ColoursATargetAsAHostName)
    auto result = answered();
    result.records[0].target = "svc.example.net";
 
-   EXPECT_THAT(format_result(result, true), HasSubstr("\x1b[33msvc.example.net\x1b[0m"));
-   EXPECT_THAT(format_result(result, false), HasSubstr("HTTPS 1 svc.example.net alpn=h3"));
+   EXPECT_THAT(format_result(result, {.color = true}), HasSubstr("\x1b[33msvc.example.net\x1b[0m"));
+   EXPECT_THAT(format_result(result, {}), HasSubstr("HTTPS 1 svc.example.net alpn=h3"));
 }
 
 TEST(Output, ColoursTheStatusByItsClass)
 {
-   EXPECT_THAT(format_result(answered(204), true), HasSubstr("\x1b[32m204\x1b[0m"));
-   EXPECT_THAT(format_result(answered(301), true), HasSubstr("\x1b[36m301\x1b[0m"));
-   EXPECT_THAT(format_result(answered(404), true), HasSubstr("\x1b[31m404\x1b[0m"));
-   EXPECT_THAT(format_result(answered(503), true), HasSubstr("\x1b[31m503\x1b[0m"));
+   EXPECT_THAT(format_result(answered(204), {.color = true}), HasSubstr("\x1b[32m204\x1b[0m"));
+   EXPECT_THAT(format_result(answered(301), {.color = true}), HasSubstr("\x1b[36m301\x1b[0m"));
+   EXPECT_THAT(format_result(answered(404), {.color = true}), HasSubstr("\x1b[31m404\x1b[0m"));
+   EXPECT_THAT(format_result(answered(503), {.color = true}), HasSubstr("\x1b[31m503\x1b[0m"));
 }
 
 TEST(Output, HasNoColourWithoutColour)
@@ -212,7 +257,7 @@ TEST(Output, HasNoColourWithoutColour)
    for (const auto& result :
         {answered(), Result{.host = "h", .outcome = Outcome::failed, .notes = {"n"}},
          Result{.host = "h", .outcome = Outcome::lookup_failed}})
-      EXPECT_THAT(format_result(result, false), Not(HasSubstr("\x1b")));
+      EXPECT_THAT(format_result(result, {.all_headers = true}), Not(HasSubstr("\x1b")));
 
    const Counts counts{{Outcome::answered, 1}, {Outcome::failed, 1}};
    EXPECT_THAT(format_summary(counts, false), Not(HasSubstr("\x1b")));
