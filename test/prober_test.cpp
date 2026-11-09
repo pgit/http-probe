@@ -297,6 +297,7 @@ TEST_F(Probe, ReportsARedirectAndDoesNotFollowIt)
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].status, 302);
    EXPECT_THAT(results[0].fields, Contains(Pair("location", "/moved")));
+   EXPECT_EQ(results[0].location, "/moved"); // as it came, not resolved
    EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
 
@@ -483,6 +484,7 @@ TEST_F(Probe, DoesNotFollowARedirectOverHttp2)
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].status, 302) << notes(results[0]);
    EXPECT_THAT(results[0].fields, Contains(Pair("location", "/moved")));
+   EXPECT_EQ(results[0].location, "/moved"); // as it came, not resolved
    EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
 
@@ -498,7 +500,21 @@ TEST_F(Probe, DoesNotFollowARedirectOverHttp1)
    EXPECT_EQ(results[0].status, 302) << notes(results[0]);
    // As it came, and only HTTP/2 and HTTP/3 have field names in lower case on the wire.
    EXPECT_THAT(results[0].fields, Contains(Pair("Location", "/moved")));
+   EXPECT_EQ(results[0].location, "/moved");
    EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, HasADestinationForARedirectOnly)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.status = 201, .location = "/created"});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 201) << notes(results[0]);
+   EXPECT_THAT(results[0].fields, Contains(Pair("location", "/created")));
+   EXPECT_THAT(results[0].location, IsEmpty());
 }
 
 TEST_F(Probe, FallsBackToTheNextRecordWhenAConnectionFails)
@@ -1453,7 +1469,10 @@ TEST_F(Probe, EachAddressReportsARedirectAndDoesNotFollowIt)
    EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
    ASSERT_THAT(results[0].replies, Not(IsEmpty()));
    for (const auto& reply : results[0].replies)
+   {
       EXPECT_EQ(reply.status, 301);
+      EXPECT_EQ(reply.location, "/elsewhere");
+   }
    EXPECT_THAT(site.targets(), testing::Each("/"));
    EXPECT_EQ(site.requests().size(), results[0].replies.size());
 }

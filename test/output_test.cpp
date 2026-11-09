@@ -40,6 +40,30 @@ TEST(Output, SaysWhatCameBack)
              "  server: test\n");
 }
 
+TEST(Output, SaysWhereARedirectPoints)
+{
+   auto result = answered(301);
+   result.location = "https://www.example.com/";
+   EXPECT_EQ(format_result(result, false),
+             "example.com: 301 [h3 example.com:443] at 192.0.2.1, 5 bytes in 12ms"
+             " -> https://www.example.com/\n"
+             "  record: HTTPS 1 . alpn=h3 ipv4hint=192.0.2.1 ipv6hint=2001:db8::1\n"
+             "  server: test\n");
+}
+
+TEST(Output, SaysWhereARedirectPointsForEachAddress)
+{
+   const Result result{
+      .host = "example.com",
+      .outcome = Outcome::answered,
+      .replies = {{.address = "2001:db8::1", .status = 308, .location = "/elsewhere"},
+                  {.address = "192.0.2.1", .status = 301, .reason = "Moved", .location = "/b"}}};
+
+   EXPECT_EQ(format_result(result, false), "example.com: answered\n"
+                                           "  address: 2001:db8::1 308 -> /elsewhere\n"
+                                           "  address: 192.0.2.1 301 Moved -> /b\n");
+}
+
 TEST(Output, SaysWhichAddressFailed)
 {
    EXPECT_EQ(format_result({.host = "example.com",

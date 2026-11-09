@@ -20,7 +20,8 @@ It looks up the HTTPS records of each host in DNS ([RFC 9460](https://www.rfc-ed
 and requests `https://<host>/` once, over TLS, in the way that the records say. It prints the status,
 the route, the IP address it connected to, the time it took and the header fields of the response,
 along with the host's records. A redirect is reported and not followed, and nothing else on the host
-is requested. [Here is what that looks like](doc/README.md).
+is requested. Its `Location` goes at the end of the status line, as in `301 … -> https://www.example.com/`,
+as it came: not resolved against the URL, and not looked up. [Here is what that looks like](doc/README.md).
 
 There is output for every host but those that do not exist, which `--all` adds. The counts at the end
 look like this, on stderr:
@@ -91,7 +92,8 @@ per host, and it can't go with `--dns-only`. The addresses are all asked at the 
 takes as long as its slowest address, and they are printed in the order of trying them all the same.
 `--timeout-ms` then is per address on each route. Beyond
 that, the next paragraph holds for each address, and nothing is followed here either. HTTP/2 and HTTP/3
-have no reason phrase, so there the `OK` is what that status is called.
+have no reason phrase, so there the `OK` is what that status is called. A redirect has its `Location`
+at the end of the line, as in `301 Moved Permanently -> /elsewhere`, and the header fields are left out.
 
 **One request means one.** The next route is for when connecting failed. Once a request has gone out,
 the host has been asked, so that a timeout or a response cut short ends it there, as a failure.

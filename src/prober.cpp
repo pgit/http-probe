@@ -38,6 +38,17 @@ constexpr std::string_view user_agent = "http-probe/0.0.1 (+https://github.com/p
 constexpr int max_alias_chain = 8;
 
 //
+// Where a redirect points, as the server put it: nothing is resolved against the URL that was
+// asked for, and nothing is requested. Empty for anything but a redirect.
+//
+std::string redirect_location(const anyhttp::client::Message& message)
+{
+   const auto status = message.result_int();
+   return status >= 300 && status < 400 ? std::string(message[http::field::location])
+                                        : std::string();
+}
+
+//
 // The resolver does not write anywhere by itself. Its messages go where our own go.
 //
 c_ares_async::log_function resolver_log(std::shared_ptr<spdlog::logger> logger)
@@ -451,6 +462,7 @@ capy::task<Result> Prober::probe(const std::string& host)
          result.outcome = Result::Outcome::answered;
          result.error.clear();
          result.status = static_cast<int>(response.message.result_int());
+         result.location = redirect_location(response.message);
          auto spoken = route;
          spoken.protocol = response.protocol;
          result.route = spoken.to_string();
@@ -488,6 +500,7 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
       {
          reply.status = static_cast<int>(response.message.result_int());
          reply.reason = response.message.reason();
+         reply.location = redirect_location(response.message);
          reply.error.clear();
          co_return {std::error_code(), std::move(reply)};
       }

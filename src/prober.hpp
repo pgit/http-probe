@@ -105,6 +105,7 @@ struct AddressReply
    std::string address;
    int status = 0; ///< without \c error
    std::string reason; ///< without \c error: "OK", which HTTP/2 and HTTP/3 only know by the status
+   std::string location; ///< with a 3xx status: the Location field as it came, see Result::location
    std::string error; ///< what went wrong on the last route, if no response could be had
 };
 
@@ -130,6 +131,9 @@ struct Result
    int status = 0; ///< with \c answered
    std::string route; ///< with \c answered: what the response came over, as the server chose it
    std::vector<std::pair<std::string, std::string>> fields; ///< with \c answered
+   /// With \c answered and a 3xx status: the Location field as it came, neither resolved nor
+   /// followed, and empty without one.
+   std::string location;
    std::size_t body_size = 0; ///< with \c answered
    std::chrono::milliseconds duration{}; ///< with \c answered: of the attempt that got through
 
