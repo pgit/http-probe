@@ -103,14 +103,26 @@ std::string record_text(const c_ares_async::https_record& record, bool color)
    return text;
 }
 
+//
+// The header fields of a response, a line each, \p indent deep.
+//
+std::string fields_text(const HeaderFields& fields, std::string_view indent, bool color)
+{
+   std::string text;
+   for (const auto& [name, value] : fields)
+      text += std::format("{}{}: {}\n", indent, colored(name, color_of::field, color), value);
+   return text;
+}
+
 // =================================================================================================
 
 } // namespace
 
-std::string format_result(const Result& result, bool color)
+std::string format_result(const Result& result, const Style& style)
 {
    using Outcome = Result::Outcome;
 
+   const bool color = style.color;
    const auto host = colored(result.host, color_of::name, color);
    std::string text;
    switch (result.outcome)
@@ -154,12 +166,16 @@ std::string format_result(const Result& result, bool color)
    for (const auto& address : result.addresses)
       text += std::format("  address: {}\n", address_text(address, color));
    for (const auto& reply : result.replies)
+   {
       text += std::format("  address: {} {}\n", address_text(reply.address, color),
                           reply_text(reply, color));
+      if (style.all_headers)
+         text += fields_text(reply.fields, "    ", color);
+   }
    for (const auto& note : result.notes)
       text += colored(std::format("  note: {}", note), color_of::note, color) + "\n";
-   for (const auto& [name, value] : result.fields)
-      text += std::format("  {}: {}\n", colored(name, color_of::field, color), value);
+   if (style.all_headers)
+      text += fields_text(result.fields, "  ", color);
    return text;
 }
 

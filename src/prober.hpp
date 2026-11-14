@@ -99,6 +99,9 @@ std::vector<std::string> read_hosts(std::istream& list, std::vector<std::string>
 /// Moves the IPv6 addresses to the front, each family keeping the order it was in.
 void prefer_ipv6(std::vector<corosio::endpoint>& addresses);
 
+/// The header fields of a response, in the order they came.
+using HeaderFields = std::vector<std::pair<std::string, std::string>>;
+
 /// What came of the request to one address of a host, see Config::each_address.
 struct AddressReply
 {
@@ -106,6 +109,7 @@ struct AddressReply
    int status = 0; ///< without \c error
    std::string reason; ///< without \c error: "OK", which HTTP/2 and HTTP/3 only know by the status
    std::string location; ///< with a 3xx status: the Location field as it came, see Result::location
+   HeaderFields fields; ///< without \c error
    std::string error; ///< what went wrong on the last route, if no response could be had
 };
 
@@ -130,7 +134,7 @@ struct Result
 
    int status = 0; ///< with \c answered
    std::string route; ///< with \c answered: what the response came over, as the server chose it
-   std::vector<std::pair<std::string, std::string>> fields; ///< with \c answered
+   HeaderFields fields; ///< with \c answered
    /// With \c answered and a 3xx status: the Location field as it came, neither resolved nor
    /// followed, and empty without one.
    std::string location;

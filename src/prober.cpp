@@ -46,6 +46,14 @@ std::string redirect_location(const anyhttp::client::Message& message)
                                         : std::string();
 }
 
+HeaderFields header_fields(const anyhttp::client::Message& message)
+{
+   HeaderFields fields;
+   for (const auto& field : message)
+      fields.emplace_back(field.name_string(), field.value());
+   return fields;
+}
+
 //
 // The resolver does not write anywhere by itself. Its messages go where our own go.
 //
@@ -465,8 +473,7 @@ capy::task<Result> Prober::probe(const std::string& host)
          auto spoken = route;
          spoken.protocol = response.protocol;
          result.route = spoken.to_string();
-         for (const auto& field : response.message)
-            result.fields.emplace_back(field.name_string(), field.value());
+         result.fields = header_fields(response.message);
          result.body_size = response.message.body().size();
          result.duration = response.duration;
          co_return result;
@@ -500,6 +507,7 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
          reply.status = static_cast<int>(response.message.result_int());
          reply.reason = response.message.reason();
          reply.location = redirect_location(response.message);
+         reply.fields = header_fields(response.message);
          reply.error.clear();
          co_return {std::error_code(), std::move(reply)};
       }

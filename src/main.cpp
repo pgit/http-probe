@@ -46,8 +46,8 @@ constexpr std::string_view usage = R"(usage: http-probe [options] HOST...
 
 constexpr std::string_view about =
    "Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once, the way "
-   "they say or over TCP on port 443 if they don't, printing the status and header fields of the "
-   "response. Redirects are reported and not followed, and nothing else on the host is requested.";
+   "they say or over TCP on port 443 if they don't, printing the status of the response on one "
+   "line. Redirects are reported and not followed, and nothing else on the host is requested.";
 
 constexpr std::string_view exit_code =
    "The exit code is 0 if every host that was connected to answered, whatever the status, and "
@@ -59,6 +59,7 @@ struct Arguments
    std::vector<std::string> files;
    bool help = false;
    bool all = false;
+   bool all_headers = false;
    bool color = false;
    int verbosity = 0;
 };
@@ -177,6 +178,8 @@ po::options_description describe_options(Arguments& arguments)
    opts("each-address", po::bool_switch(&config.each_address),
         "send a request to each address of a host and print the status line of each, instead of "
         "one request per host");
+   opts("all-headers", po::bool_switch(&arguments.all_headers),
+        "also print the header fields of each response, after its status line");
    opts("all", po::bool_switch(&arguments.all),
         "also print the hosts that do not exist, and those that --h3, --h2 or --h1 leave out");
    opts("color", po::bool_switch(&arguments.color),
@@ -305,7 +308,7 @@ int main(int argc, char* argv[])
          return 0;
       }
 
-      auto& [config, files, help, all, color, verbosity] = arguments;
+      auto& [config, files, help, all, all_headers, color, verbosity] = arguments;
       config.logger = set_up_logging(verbosity, color);
 
       const bool own_dns_server = !config.dns_server.empty();
@@ -318,7 +321,8 @@ int main(int argc, char* argv[])
             ++with_records;
          if (all || (result.outcome != Outcome::not_found && result.outcome != Outcome::left_out))
          {
-            std::print("{}", http_probe::format_result(result, color_results));
+            std::print("{}", http_probe::format_result(
+                                result, {.color = color_results, .all_headers = all_headers}));
             std::ignore = std::fflush(stdout); // a run can take a while, and it is worth watching
          }
       };

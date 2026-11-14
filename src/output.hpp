@@ -18,8 +18,16 @@ namespace http_probe
 
 using Counts = std::map<Result::Outcome, std::size_t>;
 
-/// All there is to say about one host, a line each and with a line break at the end.
-std::string format_result(const Result& result, bool color);
+/// What to print of a result, and how.
+struct Style
+{
+   bool color = false;
+   bool all_headers = false; ///< the header fields of each response, not only its status line
+};
+
+/// All there is to say about one host, a line each and with a line break at the end. A response
+/// has a line of its own, and with Style::all_headers its header fields after that.
+std::string format_result(const Result& result, const Style& style);
 
 /// How it went overall, without a line break.
 std::string format_summary(Counts counts, bool color);

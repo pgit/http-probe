@@ -21,7 +21,7 @@ add_library(
     fake_dns STATIC ${c_ares_async_SOURCE_DIR}/test/fake_dns_server.cpp
                     ${c_ares_async_SOURCE_DIR}/test/test_certificate.cpp)
 target_include_directories(fake_dns SYSTEM PUBLIC ${c_ares_async_SOURCE_DIR}/test)
-target_link_libraries(fake_dns PUBLIC c_ares_async::c_ares_async anyhttp::anyhttp OpenSSL::SSL
+target_link_libraries(fake_dns PUBLIC c_ares_async::corosio anyhttp::anyhttp OpenSSL::SSL
                                       OpenSSL::Crypto)
 
 add_library(test_site STATIC site.cpp)
@@ -98,6 +98,13 @@ add_test(NAME http_probe_refuses_each_address_with_dns_only
          COMMAND http-probe --each-address --dns-only localhost)
 set_tests_properties(http_probe_refuses_each_address_with_dns_only PROPERTIES
     PASS_REGULAR_EXPRESSION "rules out --each-address")
+
+# --all is a prefix of --all-headers, which program_options takes abbreviations of, and is still
+# itself rather than ambiguous.
+add_test(NAME http_probe_tells_all_from_all_headers
+         COMMAND http-probe --all --dns-server 127.0.0.1:1 localhost)
+set_tests_properties(http_probe_tells_all_from_all_headers PROPERTIES
+    PASS_REGULAR_EXPRESSION "1 lookups failed")
 
 # An empty list gets as far as having no hosts, and goes nowhere.
 add_test(NAME http_probe_takes_each_address_with_a_list

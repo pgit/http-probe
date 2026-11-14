@@ -3,7 +3,7 @@
 One host, asked for its records over DNS over TLS. This is how the result looks in a terminal:
 
 ```sh
-build/http-probe --dot --dns-server one.one.one.one cloudflare.com
+build/http-probe --all-headers --dot --dns-server one.one.one.one cloudflare.com
 ```
 
 ![The result for cloudflare.com: 301 over HTTP/3, its HTTPS record and response header fields, and the summary line, in colour](sample-output.png)
