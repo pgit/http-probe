@@ -2,11 +2,11 @@
 
 #include <anyhttp/session.hpp>
 
-#include <boost/beast/http/field.hpp>
 #include <boost/capy/cond.hpp>
 #include <boost/capy/when_all.hpp>
 #include <boost/corosio/ip_address.hpp>
 #include <boost/corosio/timeout.hpp>
+#include <boost/http/field.hpp>
 #include <boost/url/parse.hpp>
 #include <boost/url/url.hpp>
 
@@ -21,7 +21,7 @@
 #include <stdexcept>
 #include <tuple>
 
-namespace http = boost::beast::http;
+namespace http = boost::http;
 
 namespace http_probe
 {
@@ -41,8 +41,8 @@ constexpr int max_alias_chain = 8;
 //
 std::string redirect_location(const anyhttp::client::Message& message)
 {
-   const auto status = message.result_int();
-   return status >= 300 && status < 400 ? std::string(message[http::field::location])
+   const auto status = message.status_int();
+   return status >= 300 && status < 400 ? std::string(message.value_or(http::field::location, ""))
                                         : std::string();
 }
 
@@ -50,7 +50,7 @@ HeaderFields header_fields(const anyhttp::client::Message& message)
 {
    HeaderFields fields;
    for (const auto& field : message)
-      fields.emplace_back(field.name_string(), field.value());
+      fields.emplace_back(field.name, field.value);
    return fields;
 }
 
@@ -468,7 +468,7 @@ capy::task<Result> Prober::probe(const std::string& host)
 
          result.outcome = Result::Outcome::answered;
          result.error.clear();
-         result.status = static_cast<int>(response.message.result_int());
+         result.status = static_cast<int>(response.message.status_int());
          result.location = redirect_location(response.message);
          auto spoken = route;
          spoken.protocol = response.protocol;
@@ -504,7 +504,7 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
          co_await attempt(route, host, corosio::endpoint(address, route.port), deadline);
       if (!ec)
       {
-         reply.status = static_cast<int>(response.message.result_int());
+         reply.status = static_cast<int>(response.message.status_int());
          reply.reason = response.message.reason();
          reply.location = redirect_location(response.message);
          reply.fields = header_fields(response.message);

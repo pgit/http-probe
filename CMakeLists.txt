@@ -50,7 +50,7 @@ set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
 include(FetchContent)
 FetchContent_Declare(anyhttp
     GIT_REPOSITORY https://github.com/pgit/anyhttp.git
-    GIT_TAG bc985a0e040d8b2dd027552b964bde19b0fbf38a
+    GIT_TAG eda7a77de29b503bfb22a1edd40bdd5f8ab39467
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
@@ -59,16 +59,18 @@ FetchContent_Declare(c_ares_async
 
 #
 # Both libraries pin these as well. The first declaration wins, so these are the ones both of them
-# get, and here they are SYSTEM, too. They are anyhttp's pins, and c-ares-async has the same.
+# get, and here they are SYSTEM, too. They are anyhttp's pins, which Boost.HTTP in anyhttp has to
+# build against. c-ares-async still pins the pair before them, bdadc6a and fd8e95a, and builds
+# against these all the same.
 #
 FetchContent_Declare(capy
     GIT_REPOSITORY https://github.com/cppalliance/capy.git
-    GIT_TAG bdadc6adef8c8eb79da6454373175bb1428be524
+    GIT_TAG d62f5de1684389682ff4201a6171eec646165036
     EXCLUDE_FROM_ALL
     SYSTEM)
 FetchContent_Declare(corosio
     GIT_REPOSITORY https://github.com/cppalliance/corosio.git
-    GIT_TAG fd8e95a7125047d5385068a4c640da8232b9588e
+    GIT_TAG 13bcf933adf8c5ce8576bd3349ae58d2e46e5c53
     EXCLUDE_FROM_ALL
     SYSTEM)
 
