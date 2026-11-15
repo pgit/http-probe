@@ -96,6 +96,24 @@ have no reason phrase, so there the `OK` is what that status is called. A redire
 at the end of the line, as in `301 Moved Permanently -> /elsewhere`, and `--all-headers` adds the
 header fields of each response below its line.
 
+**With `--stats`,** the numbers of the run follow the counts at the end, on stderr:
+
+```
+lookups:   12 for HTTPS records, 10 for addresses
+requests:  10 sent on 11 connection attempts, 2 timed out
+rate:      4.0 requests/s over 2.5s
+responses: 9: 6 2xx, 2 3xx, 1 5xx, 3 h3, 5 h2, 1 h1
+received:  1.2 MB of bodies, 4.3 kB of headers
+durations: 10ms min, 20ms median, 300ms max
+```
+
+A connection attempt is one per address on each route that got a turn, and a request is one that
+went out, however it ended. The rate is that of the requests over the whole run, lookups included.
+The bytes are those of the responses that came back whole, after decoding: the headers as HTTP/1.1
+text whatever the protocol, with nothing of TLS, QUIC or the framing of HTTP/2 and HTTP/3. The
+durations are those of the responses, from connecting to the end, as on their lines. The last three
+lines are left out without a response.
+
 **One request means one.** The next route is for when connecting failed. Once a request has gone out,
 the host has been asked, so that a timeout or a response cut short ends it there, as a failure.
 

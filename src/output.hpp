@@ -32,6 +32,10 @@ std::string format_result(const Result& result, const Style& style);
 /// How it went overall, without a line break.
 std::string format_summary(Counts counts, bool color);
 
+/// The numbers of a run, a line each and with a line break at the end. What is about responses is
+/// left out where there were none.
+std::string format_stats(const Stats& stats);
+
 // =================================================================================================
 
 } // namespace http_probe

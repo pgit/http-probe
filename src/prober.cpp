@@ -269,6 +269,7 @@ capy::task<std::string> Prober::dns_server_addresses()
 
 capy::task<> Prober::run()
 {
+   const auto start = std::chrono::steady_clock::now();
    const auto servers = co_await dns_server_addresses();
 
    resolver_ = std::make_unique<c_ares_async::resolver>(executor_, config_.dns_tls);
@@ -285,6 +286,8 @@ capy::task<> Prober::run()
    std::ignore = co_await capy::when_all(std::move(workers));
 
    resolver_.reset();
+   stats_.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
 }
 
 capy::task<capy::results<>> Prober::work()
@@ -316,6 +319,7 @@ capy::task<ServiceRecords> Prober::resolve_service(const std::string& host)
       // GHSA-6wfj-rwm7-3542 is about. c-ares has timeouts of its own.
       //
       config_.logger->debug("{}: asking for the HTTPS records of '{}'", host, found.owner);
+      ++stats_.https_lookups;
       auto [ec, records] = co_await resolver_->resolve_https(found.owner);
       if (ec)
       {
@@ -392,6 +396,7 @@ capy::task<Result> Prober::probe(const std::string& host)
    // host, and no record says that it has to have one.
    //
    config_.logger->debug("{}: asking for the addresses of '{}'", host, host);
+   ++stats_.address_lookups;
    auto [lookup_ec, addresses] = co_await resolver_->resolve(host, "");
    if (lookup_ec || addresses.empty())
    {
@@ -556,9 +561,14 @@ Prober::attempt(const Route& route, const std::string& host, const corosio::endp
       exchange(client, session, request_sent, boost::urls::url(std::format("https://{}/", host))),
       deadline);
 
+   ++stats_.attempts;
+   if (request_sent)
+      ++stats_.requests;
+
    response.request_sent = request_sent;
    if (ec == capy::cond::timeout)
    {
+      ++stats_.timeouts;
       response.error = std::format("timed out after {}", config_.timeout);
       co_return {ec, std::move(response)};
    }
@@ -567,10 +577,23 @@ Prober::attempt(const Route& route, const std::string& host, const corosio::endp
       std::chrono::steady_clock::now() - start);
 
    if (!ec)
+   {
+      count_response(response);
       if (auto [shutdown_ec] = co_await session.shutdown(); shutdown_ec)
          config_.logger->debug("{}: shutdown: {}", host, shutdown_ec.message());
+   }
 
    co_return {ec, std::move(response)};
+}
+
+void Prober::count_response(const Response& response)
+{
+   ++stats_.responses;
+   ++stats_.status_classes[static_cast<int>(response.message.status_int()) / 100];
+   ++stats_.protocols[response.protocol];
+   stats_.header_bytes += response.message.buffer().size();
+   stats_.body_bytes += response.message.body().size();
+   stats_.durations.push_back(response.duration);
 }
 
 //

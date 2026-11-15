@@ -140,6 +140,7 @@ protected:
             context.stop();
          })(run());
       context.run();
+      stats = prober.stats();
       if (failed)
          std::rethrow_exception(failed);
    }
@@ -191,6 +192,7 @@ protected:
    corosio::io_context context;
    Site site{context.get_executor()};
    std::vector<Result> results;
+   Stats stats; ///< of the last probe()
 };
 
 } // namespace
@@ -895,6 +897,111 @@ TEST_F(Probe, KeepsAnyhttpOutOfALoggerOfItsOwn)
    EXPECT_THAT(own_log.str(), Not(HasSubstr("GET https://localhost/")));
    EXPECT_THAT(library_log.str(), HasSubstr("GET https://localhost/"));
    EXPECT_THAT(library_log.str(), Not(HasSubstr("asking for the HTTPS records")));
+}
+
+// =================================================================================================
+// What is counted
+// =================================================================================================
+
+TEST_F(Probe, CountsTheLookupsTheRequestAndWhatCameBack)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   probe(config());
+
+   EXPECT_EQ(stats.https_lookups, 1u);
+   EXPECT_EQ(stats.address_lookups, 1u);
+   EXPECT_EQ(stats.attempts, 1u);
+   EXPECT_EQ(stats.requests, 1u);
+   EXPECT_EQ(stats.responses, 1u);
+   EXPECT_EQ(stats.timeouts, 0u);
+   EXPECT_THAT(stats.status_classes, ElementsAre(Pair(2, 1u)));
+   EXPECT_THAT(stats.protocols, ElementsAre(Pair(anyhttp::Protocol::h3, 1u)));
+   EXPECT_EQ(stats.body_bytes, 5u);
+   EXPECT_GT(stats.header_bytes, std::string_view("content-type: text/html").size());
+   ASSERT_EQ(stats.durations.size(), 1u);
+   EXPECT_EQ(stats.durations[0], results.at(0).duration);
+   EXPECT_GE(stats.elapsed, stats.durations[0]);
+}
+
+TEST_F(Probe, CountsTheHeaderBytesOverTcpAsWell)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.status = 404});
+
+   probe(config());
+
+   EXPECT_EQ(stats.requests, 1u);
+   EXPECT_THAT(stats.protocols, ElementsAre(Pair(anyhttp::Protocol::h2, 1u)));
+   EXPECT_THAT(stats.status_classes, ElementsAre(Pair(4, 1u)));
+   EXPECT_GT(stats.header_bytes, std::string_view("HTTP/1.1 404 Not Found\r\n").size());
+}
+
+TEST_F(Probe, CountsAnAttemptThatTimedOutBeforeTheRequest)
+{
+   auto silent = silent_udp_socket();
+   site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
+   site.dns().add_https("localhost", 2, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   probe(std::move(configuration));
+
+   EXPECT_EQ(stats.attempts, 2u);
+   EXPECT_EQ(stats.timeouts, 1u);
+   EXPECT_EQ(stats.requests, 1u);
+   EXPECT_EQ(stats.responses, 1u);
+}
+
+TEST_F(Probe, CountsARequestThatTimedOutWithoutAResponse)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "too late", .delay = 400ms});
+
+   auto configuration = config();
+   configuration.timeout = 100ms;
+   probe(std::move(configuration));
+
+   EXPECT_EQ(stats.attempts, 1u);
+   EXPECT_EQ(stats.requests, 1u);
+   EXPECT_EQ(stats.timeouts, 1u);
+   EXPECT_EQ(stats.responses, 0u);
+   EXPECT_EQ(stats.body_bytes, 0u);
+   EXPECT_THAT(stats.durations, IsEmpty());
+}
+
+TEST_F(Probe, CountsARequestToEachAddress)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   const auto addresses = results[0].replies.size();
+   EXPECT_GE(addresses, 1u);
+   EXPECT_EQ(stats.address_lookups, 1u);
+   EXPECT_EQ(stats.requests, site.requests().size());
+   EXPECT_EQ(stats.attempts, addresses);
+}
+
+TEST_F(Probe, CountsOnlyTheLookupsWithDnsOnly)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+
+   auto configuration = config();
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   EXPECT_EQ(stats.https_lookups, 1u);
+   EXPECT_EQ(stats.address_lookups, 1u);
+   EXPECT_EQ(stats.attempts, 0u);
+   EXPECT_EQ(stats.requests, 0u);
+   EXPECT_THAT(site.requests(), IsEmpty());
 }
 
 // =================================================================================================

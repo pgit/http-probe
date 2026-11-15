@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <functional>
 #include <istream>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -149,6 +150,38 @@ struct Result
    std::vector<std::string> notes; ///< records that could not be used, routes that did not work
 };
 
+/// What a run came to as a whole, counted as it goes. Everything happens on one executor, so these
+/// are plain numbers.
+struct Stats
+{
+   std::size_t https_lookups = 0; ///< queries for HTTPS records, those for alias targets included
+   std::size_t address_lookups = 0; ///< queries for the addresses of a host
+
+   /// Connections tried, one per address on each route that got a turn, whether a request went out
+   /// on it or not.
+   std::size_t attempts = 0;
+   std::size_t requests = 0; ///< requests that went out, however they ended
+   std::size_t responses = 0; ///< responses that came back whole
+   std::size_t timeouts = 0; ///< attempts that ran out of time, before or after the request
+
+   /// The responses by the first digit of their status, 2 for 2xx, and by the protocol the server
+   /// chose to speak.
+   std::map<int, std::size_t> status_classes;
+   std::map<anyhttp::Protocol, std::size_t> protocols;
+
+   /// What the responses came to, after decoding: the header as Boost.HTTP puts it into text, which
+   /// is HTTP/1.1 whatever the protocol, and the body. TLS, QUIC and the framing of HTTP/2 and
+   /// HTTP/3 are not in this, and neither is what came of a request that did not end in a response.
+   std::size_t header_bytes = 0;
+   std::size_t body_bytes = 0;
+
+   /// How long each response took, from connecting to its end, as in Result::duration.
+   std::vector<std::chrono::milliseconds> durations;
+
+   /// From the start of run() to its end, including any lookups of the DNS servers.
+   std::chrono::milliseconds elapsed{};
+};
+
 /**
  * Looks up the HTTPS records and the addresses of each of Config::hosts with the resolver of
  * c-ares-async, and sends one request to each host that can be connected to (see plan_routes()),
@@ -175,6 +208,9 @@ public:
 
    capy::task<> run();
 
+   /// What has been counted so far, all of the run once run() is done.
+   const Stats& stats() const { return stats_; }
+
 private:
    struct Response
    {
@@ -199,12 +235,14 @@ private:
    capy::task<capy::results<Response>> exchange(anyhttp::client::Client& client,
                                                 anyhttp::Session& session, bool& request_sent,
                                                 boost::urls::url url);
+   void count_response(const Response& response);
 
    capy::any_executor executor_;
    Config config_;
    Observer observer_;
    std::vector<std::string> hosts_;
    std::size_t next_host_ = 0;
+   Stats stats_;
 
    /// For the duration of run(), as a connection for DNS over TLS stays open for as long as this is
    /// around, and with that the event loop busy. By pointer, as there is no std::optional of it.

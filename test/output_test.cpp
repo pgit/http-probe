@@ -280,3 +280,56 @@ TEST(Output, DrawsAttentionOnlyToWhatHappened)
    EXPECT_THAT(text, HasSubstr("\x1b[32m1 answered\x1b[0m"));
    EXPECT_THAT(text, HasSubstr(", 0 failed,")) << "nothing to see, no colour";
 }
+
+TEST(Output, HasTheNumbersOfARun)
+{
+   const Stats stats{.https_lookups = 12,
+                     .address_lookups = 10,
+                     .attempts = 11,
+                     .requests = 10,
+                     .responses = 9,
+                     .timeouts = 2,
+                     .status_classes = {{2, 6}, {3, 2}, {5, 1}},
+                     .protocols = {{anyhttp::Protocol::h1, 1},
+                                   {anyhttp::Protocol::h2, 5},
+                                   {anyhttp::Protocol::h3, 3}},
+                     .header_bytes = 4321,
+                     .body_bytes = 1'234'567,
+                     .durations = {40ms, 10ms, 300ms, 20ms},
+                     .elapsed = 2500ms};
+
+   EXPECT_EQ(format_stats(stats), "lookups:   12 for HTTPS records, 10 for addresses\n"
+                                  "requests:  10 sent on 11 connection attempts, 2 timed out\n"
+                                  "rate:      4.0 requests/s over 2.5s\n"
+                                  "responses: 9: 6 2xx, 2 3xx, 1 5xx, 3 h3, 5 h2, 1 h1\n"
+                                  "received:  1.2 MB of bodies, 4.3 kB of headers\n"
+                                  "durations: 10ms min, 20ms median, 300ms max\n");
+}
+
+TEST(Output, HasNothingAboutResponsesWithoutAny)
+{
+   const Stats stats{.https_lookups = 3, .address_lookups = 2};
+
+   EXPECT_EQ(format_stats(stats), "lookups:   3 for HTTPS records, 2 for addresses\n"
+                                  "requests:  0 sent on 0 connection attempts, 0 timed out\n"
+                                  "rate:      0 requests in no time\n"
+                                  "responses: 0\n");
+}
+
+TEST(Output, SaysHowLongAShortRunTookInMilliseconds)
+{
+   EXPECT_THAT(format_stats({.requests = 1, .elapsed = 4ms}),
+               HasSubstr("rate:      250.0 requests/s over 4ms\n"));
+}
+
+TEST(Output, PutsBytesInUnitsThatFit)
+{
+   const auto received = [](std::size_t body) {
+      return format_stats({.responses = 1, .status_classes = {{2, 1}}, .body_bytes = body});
+   };
+   EXPECT_THAT(received(999), HasSubstr("999 B of bodies"));
+   EXPECT_THAT(received(1000), HasSubstr("1.0 kB of bodies"));
+   EXPECT_THAT(received(999'949), HasSubstr("999.9 kB of bodies"));
+   EXPECT_THAT(received(999'950), HasSubstr("1.0 MB of bodies"));
+   EXPECT_THAT(received(3'400'000'000), HasSubstr("3.4 GB of bodies"));
+}

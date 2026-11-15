@@ -60,6 +60,7 @@ struct Arguments
    bool help = false;
    bool all = false;
    bool all_headers = false;
+   bool stats = false;
    bool color = false;
    int verbosity = 0;
 };
@@ -182,6 +183,10 @@ po::options_description describe_options(Arguments& arguments)
         "also print the header fields of each response, after its status line");
    opts("all", po::bool_switch(&arguments.all),
         "also print the hosts that do not exist, and those that --h3, --h2 or --h1 leave out");
+   opts("stats", po::bool_switch(&arguments.stats),
+        "at the end, also print the numbers of the run to stderr: lookups, connection attempts, "
+        "requests, the rate of them, responses by status and protocol, bytes received and how "
+        "long the responses took");
    opts("color", po::bool_switch(&arguments.color),
         "colour the output even where it does not go to a terminal, e.g. into 'less -R'");
    opts("verbose,v", po::value<std::vector<std::string>>()->zero_tokens()->composing(),
@@ -308,7 +313,7 @@ int main(int argc, char* argv[])
          return 0;
       }
 
-      auto& [config, files, help, all, all_headers, color, verbosity] = arguments;
+      auto& [config, files, help, all, all_headers, stats, color, verbosity] = arguments;
       config.logger = set_up_logging(verbosity, color);
 
       const bool own_dns_server = !config.dns_server.empty();
@@ -348,6 +353,8 @@ int main(int argc, char* argv[])
          std::rethrow_exception(failed);
 
       std::println(stderr, "{}", http_probe::format_summary(counts, color_log));
+      if (stats)
+         std::print(stderr, "{}", http_probe::format_stats(prober.stats()));
       if (with_records == 0 && !own_dns_server)
          std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
                               "resolver answers for them, so try --dns-server.");
