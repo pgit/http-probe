@@ -1,5 +1,6 @@
 //
-// One request to https://<host>/ for each host, in the way that the HTTPS records of the host say.
+// One request to https://<host>/ for each host, or to another path on it, in the way that the HTTPS
+// records of the host say.
 //
 #pragma once
 
@@ -41,6 +42,11 @@ struct Config
 {
    /// The host names to request, exactly as given: these are the only names that are connected to.
    std::vector<std::string> hosts;
+
+   /// What to ask each host for, in origin form (RFC 9112, section 3.2.1): a path, which starts
+   /// with '/', and maybe a query, as in "/robots.txt" or "/search?q=1", percent-encoded where it
+   /// has to be. The request to an alternative service asks for the same.
+   std::string path = "/";
 
    /// How many hosts to work on at the same time.
    std::size_t concurrency = 16;

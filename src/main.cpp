@@ -45,9 +45,10 @@ constexpr std::string_view usage = R"(usage: http-probe [options] HOST...
 )";
 
 constexpr std::string_view about =
-   "Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once, the way "
-   "they say or over TCP on port 443 if they don't, printing the status of the response on one "
-   "line. Redirects are reported and not followed, and nothing else on the host is requested.";
+   "Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once, or the "
+   "path of --path, the way they say or over TCP on port 443 if they don't, printing the status of "
+   "the response on one line. Redirects are reported and not followed, and nothing else on the "
+   "host is requested.";
 
 constexpr std::string_view exit_code =
    "The exit code is 0 if every host that was connected to answered, whatever the status, and "
@@ -132,6 +133,10 @@ po::options_description describe_options(Arguments& arguments)
         "a host to request, the same as giving HOST by itself");
    opts("file", po::value(&arguments.files)->value_name("LIST"),
         "read the hosts from a file, one per line, as names or as URLs");
+   opts("path", po::value(&config.path)->value_name("PATH")->default_value(config.path),
+        "what to request on each host, the same on all of them: a path, maybe with a query, as in "
+        "/robots.txt or /search?q=1, percent-encoded where it has to be. The path of a URL in "
+        "--file has no say in this");
    opts("dns-server", po::value(&config.dns_server)->value_name("SERVER"),
         "the DNS servers to ask, comma separated, by address or by name, like 192.0.2.1, "
         "192.0.2.1:5353 or dns.example.com; default: the system's, which may well not answer for "

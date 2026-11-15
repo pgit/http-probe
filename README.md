@@ -23,6 +23,11 @@ records. `--all-headers` adds the header fields of the response below that line.
 reported and not followed, and nothing else on the host is requested. Its `Location` goes at the end of the status line, as in `301 … -> https://www.example.com/`,
 as it came: not resolved against the URL, and not looked up. [Here is what that looks like](doc/README.md).
 
+**With `--path`,** that is another path on each host, the same on all of them, instead of `/`, as in
+`--path /robots.txt` or `--path '/search?q=1'`: a path and maybe a query, percent-encoded where it has
+to be, and no fragment. It is still one request, for that and for nothing else. The path of a URL in
+a `--file` list has no say in this, only its host.
+
 There is output for every host but those that do not exist, which `--all` adds. The counts at the end
 look like this, on stderr:
 
@@ -96,7 +101,7 @@ have no reason phrase, so there the `OK` is what that status is called. A redire
 at the end of the line, as in `301 Moved Permanently -> /elsewhere`, and `--all-headers` adds the
 header fields of each response below its line.
 
-**With `--alt-svc`,** a response may lead to one request more, to `https://<host>/` again, at the
+**With `--alt-svc`,** a response may lead to one request more, for the same path again, at the
 alternative service that its `Alt-Svc` field names ([RFC 7838](https://www.rfc-editor.org/rfc/rfc7838)),
 whatever the status. That is the first of the alternatives, in the order the server put them in,
 that

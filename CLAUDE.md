@@ -1,7 +1,7 @@
 # Working on http-probe
 
-It requests `https://<host>/` once per host and reports what came back, connecting the way the
-host's HTTPS records say. It is built on two libraries of the same author, each in a repository of
+It requests `https://<host>/` once per host, or the path of `--path`, and reports what came back,
+connecting the way the host's HTTPS records say. It is built on two libraries of the same author, each in a repository of
 its own: anyhttp for HTTP and c-ares-async for DNS.
 [README.md](README.md) has the build commands.
 

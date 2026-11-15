@@ -127,6 +127,11 @@ add_test(NAME http_probe_shows_the_turns_of_the_event_loop_with_vv
 set_tests_properties(http_probe_shows_the_turns_of_the_event_loop_with_vv PROPERTIES
     PASS_REGULAR_EXPRESSION "--- 0 ---")
 
+add_test(NAME http_probe_refuses_a_path_without_a_slash
+         COMMAND http-probe --path robots.txt localhost)
+set_tests_properties(http_probe_refuses_a_path_without_a_slash PROPERTIES
+    PASS_REGULAR_EXPRESSION "'robots.txt' is not a path to request")
+
 add_test(NAME http_probe_refuses_alt_svc_with_dns_only
          COMMAND http-probe --alt-svc --dns-only localhost)
 set_tests_properties(http_probe_refuses_alt_svc_with_dns_only PROPERTIES

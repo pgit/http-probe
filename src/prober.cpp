@@ -210,6 +210,11 @@ Prober::Prober(const capy::any_executor& executor, Config config, Observer obser
       throw std::invalid_argument("--dns-only connects to nothing, which rules out --each-address");
    if (config_.dns_only && config_.alt_svc)
       throw std::invalid_argument("--dns-only connects to nothing, which rules out --alt-svc");
+   if (!boost::urls::parse_origin_form(config_.path))
+      throw std::invalid_argument(
+         std::format("'{}' is not a path to request: that starts with '/', may have a query, and "
+                     "has no fragment and nothing that is not percent-encoded, like a space",
+                     config_.path));
 
    std::set<std::string> seen;
    for (const auto& host : config_.hosts)
@@ -598,8 +603,9 @@ capy::task<std::optional<AltSvcReply>> Prober::follow_alt_svc(const std::string&
 
 //
 // Connects as the route says, to this one address so that there is no doubt about which it was, and
-// asks for the host's root, by the deadline. After that it ends the connection in an orderly way,
-// which has limits of its own and is none of the timeout's business: the response is there by then.
+// asks the host for Config::path by the deadline. After that it ends the connection in an orderly
+// way, which has limits of its own and is none of the timeout's business: the response is there by
+// then.
 //
 capy::task<capy::results<Prober::Response>>
 Prober::attempt(const Route& route, const std::string& host, const corosio::endpoint& endpoint,
@@ -628,7 +634,8 @@ Prober::attempt(const Route& route, const std::string& host, const corosio::endp
    // cancelled to finish.
    //
    auto [ec, response] = co_await corosio::timeout(
-      exchange(client, session, request_sent, boost::urls::url(std::format("https://{}/", host))),
+      exchange(client, session, request_sent,
+               boost::urls::url(std::format("https://{}{}", host, config_.path))),
       deadline);
 
    ++stats_.attempts;

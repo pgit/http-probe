@@ -146,6 +146,26 @@ protected:
    }
 
    //
+   // That a request goes out for the path of the configuration, query and all, over the protocol
+   // of the record, and for nothing else.
+   //
+   void expect_path_over(std::vector<fake_dns_server::svc_param> params)
+   {
+      site.dns().add_https("localhost", 1, ".", std::move(params));
+      site.page("/", {.body = "not asked for"});
+      site.page("/robots.txt", {.body = "User-agent: *"});
+
+      auto configuration = config();
+      configuration.path = "/robots.txt?a=1&b=%20";
+      probe(std::move(configuration));
+
+      ASSERT_EQ(results.size(), 1u);
+      EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+      EXPECT_EQ(results[0].body_size, 13u);
+      EXPECT_THAT(site.targets(), ElementsAre("/robots.txt?a=1&b=%20"));
+   }
+
+   //
    // A port where nothing is ever going to answer, on any address that "localhost" may be.
    //
    corosio::udp_socket silent_udp_socket()
@@ -224,6 +244,18 @@ TEST_F(Probe, RefusesAnythingButAHostName)
    EXPECT_THAT(site.requests(), IsEmpty());
 }
 
+TEST_F(Probe, RefusesAPathThatIsNotOne)
+{
+   for (const auto* path : {"", "robots.txt", "/a b", "/a#b", "https://localhost/", "*", "/\\"})
+   {
+      auto configuration = config();
+      configuration.path = path;
+      EXPECT_THROW(probe(std::move(configuration)), std::invalid_argument) << path;
+   }
+   finish();
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
 TEST(ReadHosts, TakesNamesAndTheHostsOfUrls)
 {
    std::istringstream list("example.com\n"
@@ -289,6 +321,15 @@ TEST_F(Probe, RequestsNothingButTheRoot)
 
    EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
+
+//
+// Each protocol makes the request target of its own, so this goes for all three of them.
+//
+TEST_F(Probe, RequestsThePathItIsToldToOverHttp3) { expect_path_over(h3_at(site.port())); }
+
+TEST_F(Probe, RequestsThePathItIsToldToOverHttp2) { expect_path_over(h2_at(site.port())); }
+
+TEST_F(Probe, RequestsThePathItIsToldToOverHttp1) { expect_path_over(h1_at(site.port())); }
 
 TEST_F(Probe, ReportsARedirectAndDoesNotFollowIt)
 {
@@ -1750,6 +1791,23 @@ TEST_F(Probe, AltSvcAsksForTheRootAgainAfterARedirect)
    EXPECT_EQ(results[0].alt_svc->status, 301) << results[0].alt_svc->error;
    EXPECT_EQ(results[0].alt_svc->location, "/moved");
    EXPECT_THAT(site.targets(), ElementsAre("/", "/"));
+}
+
+TEST_F(Probe, AltSvcAsksForTheSamePath)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/robots.txt", {.body = "User-agent: *",
+                             .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   configuration.path = "/robots.txt?x";
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   ASSERT_TRUE(results[0].alt_svc) << notes(results[0]);
+   EXPECT_EQ(results[0].alt_svc->status, 200) << results[0].alt_svc->error;
+   EXPECT_THAT(site.targets(), ElementsAre("/robots.txt?x", "/robots.txt?x"));
 }
 
 TEST_F(Probe, AltSvcDoesNotGoBackToTheRouteOfTheResponse)
