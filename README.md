@@ -87,14 +87,43 @@ example.com: answered
 ```
 
 All other hosts get the outcome they always get. A host counts as `answered` only if all of its
-addresses did, whatever the status, and otherwise as `failed`. This is the one exception to one request
-per host, and it can't go with `--dns-only`. The addresses are all asked at the same time, so a host
+addresses did, whatever the status, and otherwise as `failed`. This is one of the two exceptions to one
+request per host, along with `--alt-svc`, and it can't go with `--dns-only`. The addresses are all asked at the same time, so a host
 takes as long as its slowest address, and they are printed in the order of trying them all the same.
 `--timeout-ms` then is per address on each route. Beyond
 that, the next paragraph holds for each address, and nothing is followed here either. HTTP/2 and HTTP/3
 have no reason phrase, so there the `OK` is what that status is called. A redirect has its `Location`
 at the end of the line, as in `301 Moved Permanently -> /elsewhere`, and `--all-headers` adds the
 header fields of each response below its line.
+
+**With `--alt-svc`,** a response may lead to one request more, to `https://<host>/` again, at the
+alternative service that its `Alt-Svc` field names ([RFC 7838](https://www.rfc-editor.org/rfc/rfc7838)),
+whatever the status. That is the first of the alternatives, in the order the server put them in,
+that
+
+- is on the host's own name, as in `h3=":443"`, so that no other host is asked or even looked up,
+- has a protocol that anyhttp speaks, `h3`, `h2` or `http/1.1`, and that is one to speak with `--h3`,
+  `--h2` and `--h1`,
+- and is at an endpoint that was not tried yet for the host, whether a request went out there or not.
+  An endpoint is QUIC or TCP, and the port, so that `h2=":443"` after a response over TCP on port 443
+  is the same one, whichever of HTTP/2 and HTTP/1.1 the server chose.
+
+It goes to the address that answered, with a timeout of its own, and that is it: there is no next
+address and no next alternative, and nothing it says is followed either. What came of it has a line
+below the others:
+
+```
+example.com: 200 [h2 example.com:443] at 192.0.2.1, 5 bytes in 20ms
+  record: HTTPS 1 . alpn=h2
+  alternative: [h3 example.com:443] at 192.0.2.1 200 OK
+```
+
+The alternatives ahead of it that could not be used are notes, and so are those that do not parse,
+while `clear` has none. The outcome is that of the first request, so that a host whose alternative
+fails is still `answered`, with the failure on its line. `--all-headers` adds the header fields below
+it. With `--each-address`, each address that answered gets its own alternative, on a line below its
+own, without saying the address again. It can't go with `--dns-only`. The request counts in `--stats`
+like any other.
 
 **With `--stats`,** the numbers of the run follow the counts at the end, on stderr:
 
@@ -115,7 +144,9 @@ durations are those of the responses, from connecting to the end, as on their li
 lines are left out without a response.
 
 **One request means one.** The next route is for when connecting failed. Once a request has gone out,
-the host has been asked, so that a timeout or a response cut short ends it there, as a failure.
+the host has been asked, so that a timeout or a response cut short ends it there, as a failure. With
+`--each-address` and `--alt-svc`, that goes for each address and for the alternative service: one
+request per endpoint, and never more.
 
 The address comes from c-ares, so `--dns-server` applies to it, and `/etc/hosts` as well. The address
 hints in a record do not. Addresses are tried one at a time, IPv6 first and otherwise in the order

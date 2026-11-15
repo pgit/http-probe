@@ -23,6 +23,7 @@
 #include <istream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -81,6 +82,12 @@ struct Config
    /// Result::replies.
    bool each_address = false;
 
+   /// After a response, send one more request to the alternative service that its Alt-Svc field
+   /// names first, of those that plan_alt_svc() takes, at the address that answered. That is one
+   /// request more at the most, per address with Config::each_address, and never to another host.
+   /// See Result::alt_svc and AddressReply::alt_svc.
+   bool alt_svc = false;
+
    /// Where the messages of this program and of c-ares go. anyhttp can't be told: it always uses
    /// the default logger of spdlog, so a logger other than that one can have a level of its own.
    std::shared_ptr<spdlog::logger> logger = spdlog::default_logger();
@@ -103,6 +110,18 @@ void prefer_ipv6(std::vector<corosio::endpoint>& addresses);
 /// The header fields of a response, in the order they came.
 using HeaderFields = std::vector<std::pair<std::string, std::string>>;
 
+/// What came of the request to an alternative service, see Config::alt_svc.
+struct AltSvcReply
+{
+   std::string route; ///< what the response came over, as the server chose it, or what was tried
+   std::string address;
+   int status = 0; ///< without \c error
+   std::string reason; ///< without \c error, see AddressReply::reason
+   std::string location; ///< with a 3xx status, see Result::location
+   HeaderFields fields; ///< without \c error
+   std::string error; ///< what went wrong, if no response could be had
+};
+
 /// What came of the request to one address of a host, see Config::each_address.
 struct AddressReply
 {
@@ -112,6 +131,7 @@ struct AddressReply
    std::string location; ///< with a 3xx status: the Location field as it came, see Result::location
    HeaderFields fields; ///< without \c error
    std::string error; ///< what went wrong on the last route, if no response could be had
+   std::optional<AltSvcReply> alt_svc; ///< with Config::alt_svc, if the response named one to ask
 };
 
 /// What came of one host.
@@ -147,6 +167,9 @@ struct Result
    std::vector<std::string> addresses; ///< with \c resolved: all of them, in the order of trying
    std::string error; ///< with \c failed: what went wrong on the last route
    std::vector<AddressReply> replies; ///< with Config::each_address, instead of the above
+   /// With Config::alt_svc and \c answered, but not Config::each_address, if the response named an
+   /// alternative service to ask. Whatever came of it, the outcome is that of the first request.
+   std::optional<AltSvcReply> alt_svc;
    std::vector<std::string> notes; ///< records that could not be used, routes that did not work
 };
 
@@ -191,7 +214,9 @@ struct Stats
  * about: once a request has gone out, that was it for this host, however it ended. With
  * Config::dns_only, it is the lookups and nothing else. With Config::each_address, all of this goes
  * for each address of the host instead of for the host: one request per address, to all of them at
- * the same time, with the replies in the order of the addresses.
+ * the same time, with the replies in the order of the addresses. With Config::alt_svc, a response
+ * may lead to one request more, to an alternative service at the same address, see
+ * plan_alt_svc().
  *
  * Hosts are worked on Config::concurrency at a time, so results arrive as they are ready. All of
  * this is on the one executor, which is also what calls the observer.
@@ -229,6 +254,11 @@ private:
                                                        const std::string& host,
                                                        const corosio::endpoint& address,
                                                        std::vector<std::string>& notes);
+   capy::task<std::optional<AltSvcReply>> follow_alt_svc(const std::string& host,
+                                                         const HeaderFields& fields,
+                                                         const std::vector<Route>& tried,
+                                                         const corosio::endpoint& address,
+                                                         std::vector<std::string>& notes);
    capy::task<capy::results<Response>> attempt(const Route& route, const std::string& host,
                                                const corosio::endpoint& endpoint,
                                                std::chrono::steady_clock::time_point deadline);

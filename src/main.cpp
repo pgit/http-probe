@@ -179,6 +179,10 @@ po::options_description describe_options(Arguments& arguments)
    opts("each-address", po::bool_switch(&config.each_address),
         "send a request to each address of a host and print the status line of each, instead of "
         "one request per host");
+   opts("alt-svc", po::bool_switch(&config.alt_svc),
+        "after a response, also send a request to the alternative service its Alt-Svc field names "
+        "first, of those on the host's own name, in a protocol to speak and at an endpoint not "
+        "tried yet, at the same address");
    opts("all-headers", po::bool_switch(&arguments.all_headers),
         "also print the header fields of each response, after its status line");
    opts("all", po::bool_switch(&arguments.all),

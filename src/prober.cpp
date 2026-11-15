@@ -208,6 +208,8 @@ Prober::Prober(const capy::any_executor& executor, Config config, Observer obser
       throw std::invalid_argument("a concurrency of 0 would never get anywhere");
    if (config_.dns_only && config_.each_address)
       throw std::invalid_argument("--dns-only connects to nothing, which rules out --each-address");
+   if (config_.dns_only && config_.alt_svc)
+      throw std::invalid_argument("--dns-only connects to nothing, which rules out --alt-svc");
 
    std::set<std::string> seen;
    for (const auto& host : config_.hosts)
@@ -449,8 +451,10 @@ capy::task<Result> Prober::probe(const std::string& host)
    }
 
    result.outcome = Result::Outcome::failed;
+   std::vector<Route> tried; // so that Alt-Svc does not lead back to one of them
    for (const auto& route : plan.routes)
    {
+      tried.push_back(route);
       const auto deadline = std::chrono::steady_clock::now() + config_.timeout;
       for (const auto& address : addresses)
       {
@@ -481,6 +485,9 @@ capy::task<Result> Prober::probe(const std::string& host)
          result.fields = header_fields(response.message);
          result.body_size = response.message.body().size();
          result.duration = response.duration;
+         if (config_.alt_svc)
+            result.alt_svc =
+               co_await follow_alt_svc(host, result.fields, tried, address, result.notes);
          co_return result;
       }
    }
@@ -500,8 +507,10 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
                                                             std::vector<std::string>& notes)
 {
    AddressReply reply{.address = address.address().to_string()};
+   std::vector<Route> tried;
    for (const auto& route : routes)
    {
+      tried.push_back(route);
       config_.logger->debug("{}: connecting to {} by {}, for {}", host, reply.address,
                             route.to_string(), route.source);
       const auto deadline = std::chrono::steady_clock::now() + config_.timeout;
@@ -514,6 +523,8 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
          reply.location = redirect_location(response.message);
          reply.fields = header_fields(response.message);
          reply.error.clear();
+         if (config_.alt_svc)
+            reply.alt_svc = co_await follow_alt_svc(host, reply.fields, tried, address, notes);
          co_return {std::error_code(), std::move(reply)};
       }
 
@@ -524,6 +535,65 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
          break;
    }
    co_return {std::error_code(), std::move(reply)};
+}
+
+//
+// The one request more that Alt-Svc may lead to, at the address that answered, on the host's own
+// name and at none of the endpoints tried already. Whether it gets a response or not, that is it:
+// the alternatives after it are for when the client would not have been able to use this one.
+//
+capy::task<std::optional<AltSvcReply>> Prober::follow_alt_svc(const std::string& host,
+                                                              const HeaderFields& fields,
+                                                              const std::vector<Route>& tried,
+                                                              const corosio::endpoint& address,
+                                                              std::vector<std::string>& notes)
+{
+   const auto is_alt_svc = [](std::string_view name) {
+      constexpr std::string_view alt_svc = "alt-svc";
+      return std::ranges::equal(
+         name, alt_svc, [](unsigned char a, unsigned char b) { return std::tolower(a) == b; });
+   };
+
+   std::string value;
+   for (const auto& [name, field_value] : fields)
+      if (is_alt_svc(name))
+         value += (value.empty() ? "" : ", ") + field_value;
+   if (value.empty())
+      co_return std::nullopt;
+
+   std::vector<std::string> skipped;
+   const auto alternatives = parse_alt_svc(value, skipped);
+   for (const auto& element : skipped)
+      notes.push_back(std::format("Alt-Svc '{}': does not parse", element));
+
+   auto plan = plan_alt_svc(host, alternatives, tried, config_.protocols);
+   for (const auto& rejected : plan.rejected)
+      config_.logger->debug("{}: rejected: {}", host, rejected);
+   std::ranges::move(plan.rejected, std::back_inserter(notes));
+   if (!plan.route)
+      co_return std::nullopt;
+
+   const auto& route = *plan.route;
+   AltSvcReply reply{.route = route.to_string(), .address = address.address().to_string()};
+   config_.logger->debug("{}: connecting to {} by {}, for {}", host, reply.address,
+                         route.to_string(), route.source);
+   auto [ec, response] = co_await attempt(route, host, corosio::endpoint(address, route.port),
+                                          std::chrono::steady_clock::now() + config_.timeout);
+   if (ec)
+   {
+      reply.error = response.error;
+      config_.logger->debug("{}: [{}] {} at {}", host, reply.route, reply.error, reply.address);
+      co_return reply;
+   }
+
+   auto spoken = route;
+   spoken.protocol = response.protocol;
+   reply.route = spoken.to_string();
+   reply.status = static_cast<int>(response.message.status_int());
+   reply.reason = response.message.reason();
+   reply.location = redirect_location(response.message);
+   reply.fields = header_fields(response.message);
+   co_return reply;
 }
 
 //

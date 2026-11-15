@@ -1679,6 +1679,246 @@ TEST_F(Probe, EachAddressDoesNotGoWithDnsOnly)
 }
 
 // =================================================================================================
+// --alt-svc
+// =================================================================================================
+
+namespace
+{
+
+std::pair<std::string, std::string> alt_svc(std::string value)
+{
+   return {"alt-svc", std::move(value)};
+}
+
+} // namespace
+
+TEST_F(Probe, DoesNotFollowAltSvcWithoutBeingToldTo)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcSendsOneRequestMoreToTheAlternative)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   const auto& result = results[0];
+   EXPECT_EQ(result.outcome, Result::Outcome::answered) << notes(result);
+   EXPECT_EQ(result.route, std::format("h2 localhost:{}", site.port()));
+   ASSERT_TRUE(result.alt_svc) << notes(result);
+   EXPECT_EQ(result.alt_svc->route, std::format("h3 localhost:{}", site.port()));
+   EXPECT_EQ(result.alt_svc->address, result.address) << "the same address";
+   EXPECT_EQ(result.alt_svc->status, 200) << result.alt_svc->error;
+   EXPECT_EQ(result.alt_svc->reason, "OK");
+   EXPECT_THAT(result.alt_svc->fields, Contains(Pair("content-type", "text/html")));
+   EXPECT_THAT(result.alt_svc->error, IsEmpty());
+
+   ASSERT_EQ(site.requests().size(), 2u);
+   EXPECT_EQ(site.requests()[1].authority, "localhost") << "the host, not where it went";
+   EXPECT_EQ(stats.requests, 2u);
+   EXPECT_EQ(stats.responses, 2u);
+   EXPECT_THAT(stats.protocols,
+               ElementsAre(Pair(anyhttp::Protocol::h2, 1u), Pair(anyhttp::Protocol::h3, 1u)));
+}
+
+TEST_F(Probe, AltSvcAsksForTheRootAgainAfterARedirect)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.status = 301,
+                   .location = "/moved",
+                   .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+   site.page("/moved", {.body = "not asked for"});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   ASSERT_TRUE(results[0].alt_svc) << notes(results[0]);
+   EXPECT_EQ(results[0].alt_svc->status, 301) << results[0].alt_svc->error;
+   EXPECT_EQ(results[0].alt_svc->location, "/moved");
+   EXPECT_THAT(site.targets(), ElementsAre("/", "/"));
+}
+
+TEST_F(Probe, AltSvcDoesNotGoBackToTheRouteOfTheResponse)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("tried already"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcDoesNotGoBackToARouteThatCouldNotBeConnectedTo)
+{
+   auto silent = silent_udp_socket();
+   const auto silent_port = silent.local_endpoint().port();
+   site.dns().add_https("localhost", 1, ".", h3_at(silent_port));
+   site.dns().add_https("localhost", 2, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", silent_port))}});
+
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("tried already"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcAsksNoOtherHost)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.dns().add_address("elsewhere.example.test", "127.0.0.1");
+   site.page("/",
+             {.body = "hello",
+              .fields = {alt_svc(std::format(R"(h3="elsewhere.example.test:{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("is not the host"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+   EXPECT_EQ(site.dns_queries("elsewhere.example.test"), 0u);
+}
+
+TEST_F(Probe, AltSvcReportsAFailureAndKeepsTheOutcomeOfTheFirstRequest)
+{
+   auto silent = silent_udp_socket();
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/",
+             {.body = "hello",
+              .fields = {alt_svc(std::format(R"(h3=":{}")", silent.local_endpoint().port()))}});
+
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].status, 200);
+   ASSERT_TRUE(results[0].alt_svc) << notes(results[0]);
+   EXPECT_THAT(results[0].alt_svc->error, HasSubstr("timed out"));
+   EXPECT_EQ(site.requests().size(), 1u);
+   EXPECT_EQ(stats.attempts, 2u);
+}
+
+TEST_F(Probe, AltSvcFollowsOnlyTheFirstAlternativeItCanUse)
+{
+   auto silent = silent_tcp_acceptor();
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/",
+             {.body = "hello",
+              .fields = {alt_svc(std::format(R"(h3-29=":{0}", h3=":{0}"; ma=60)", site.port())),
+                         alt_svc(std::format(R"(h2=":{}")", silent.local_endpoint().port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   ASSERT_TRUE(results[0].alt_svc) << notes(results[0]);
+   EXPECT_EQ(results[0].alt_svc->route, std::format("h3 localhost:{}", site.port()));
+   EXPECT_EQ(results[0].alt_svc->status, 200) << results[0].alt_svc->error;
+   EXPECT_THAT(notes(results[0]), HasSubstr("h3-29"));
+   EXPECT_THAT(notes(results[0]), Not(HasSubstr(std::to_string(silent.local_endpoint().port()))));
+   EXPECT_EQ(site.requests().size(), 2u);
+   EXPECT_EQ(stats.attempts, 2u);
+}
+
+TEST_F(Probe, AltSvcSpeaksOnlyTheProtocolsGiven)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.protocols = {.h2 = true};
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("not h2"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcSaysWhatDoesNotParse)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc("h3=443")}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("Alt-Svc 'h3=443': does not parse"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcSendsOneRequestMoreToEachAddress)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_FALSE(results[0].alt_svc) << "that is in the replies";
+   ASSERT_THAT(results[0].replies, Not(IsEmpty()));
+   for (const auto& reply : results[0].replies)
+   {
+      ASSERT_TRUE(reply.alt_svc) << notes(results[0]);
+      EXPECT_EQ(reply.alt_svc->address, reply.address);
+      EXPECT_EQ(reply.alt_svc->route, std::format("h3 localhost:{}", site.port()));
+      EXPECT_EQ(reply.alt_svc->status, 200) << reply.alt_svc->error;
+   }
+   EXPECT_EQ(site.requests().size(), 2 * results[0].replies.size());
+}
+
+TEST_F(Probe, AltSvcDoesNotGoWithDnsOnly)
+{
+   auto configuration = config();
+   configuration.alt_svc = true;
+   configuration.dns_only = true;
+
+   EXPECT_THROW(Prober(context.get_executor(), std::move(configuration), [](const Result&) {}),
+                std::invalid_argument);
+   finish();
+}
+
+// =================================================================================================
 // --dot
 // =================================================================================================
 

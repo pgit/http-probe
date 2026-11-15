@@ -68,6 +68,21 @@ std::string reply_text(const AddressReply& reply, bool color)
 }
 
 //
+// What came of following Alt-Svc: the route and the status line, or what went wrong, and where.
+// \p address is for when it can not go without saying.
+//
+std::string alt_svc_text(const AltSvcReply& reply, bool address, bool color)
+{
+   const auto at = address ? std::format(" at {}", address_text(reply.address, color)) : "";
+   if (!reply.error.empty())
+      return std::format("[{}]{} {}: {}", reply.route, at, colored("failed", color_of::bad, color),
+                         reply.error);
+   return std::format("[{}]{} {}{}{}", reply.route, at, status_text(reply.status, color),
+                      reply.reason.empty() ? "" : std::format(" {}", reply.reason),
+                      location_text(reply.location));
+}
+
+//
 // The value of an address hint: the addresses have a colour, the commas between them do not.
 //
 std::string address_list_text(std::string_view list, bool color)
@@ -203,11 +218,23 @@ std::string format_result(const Result& result, const Style& style)
                           reply_text(reply, color));
       if (style.all_headers)
          text += fields_text(reply.fields, "    ", color);
+      if (reply.alt_svc)
+      {
+         text += std::format("    alternative: {}\n", alt_svc_text(*reply.alt_svc, false, color));
+         if (style.all_headers)
+            text += fields_text(reply.alt_svc->fields, "      ", color);
+      }
    }
    for (const auto& note : result.notes)
       text += colored(std::format("  note: {}", note), color_of::note, color) + "\n";
    if (style.all_headers)
       text += fields_text(result.fields, "  ", color);
+   if (result.alt_svc)
+   {
+      text += std::format("  alternative: {}\n", alt_svc_text(*result.alt_svc, true, color));
+      if (style.all_headers)
+         text += fields_text(result.alt_svc->fields, "    ", color);
+   }
    return text;
 }
 

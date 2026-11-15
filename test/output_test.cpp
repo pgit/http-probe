@@ -333,3 +333,50 @@ TEST(Output, PutsBytesInUnitsThatFit)
    EXPECT_THAT(received(999'950), HasSubstr("1.0 MB of bodies"));
    EXPECT_THAT(received(3'400'000'000), HasSubstr("3.4 GB of bodies"));
 }
+
+TEST(Output, HasTheAlternativeServiceAfterTheResponse)
+{
+   auto result = answered();
+   result.route = "h2 example.com:443";
+   result.alt_svc = AltSvcReply{.route = "h3 example.com:443",
+                                .address = "192.0.2.1",
+                                .status = 200,
+                                .reason = "OK",
+                                .fields = {{"server", "quic"}}};
+
+   EXPECT_EQ(format_result(result, {.all_headers = true}),
+             "example.com: 200 [h2 example.com:443] at 192.0.2.1, 5 bytes in 12ms\n"
+             "  record: HTTPS 1 . alpn=h3 ipv4hint=192.0.2.1 ipv6hint=2001:db8::1\n"
+             "  server: test\n"
+             "  alternative: [h3 example.com:443] at 192.0.2.1 200 OK\n"
+             "    server: quic\n");
+
+   result.alt_svc = AltSvcReply{
+      .route = "h3 example.com:443", .address = "192.0.2.1", .error = "timed out after 10000ms"};
+   EXPECT_THAT(format_result(result, {}),
+               HasSubstr("  alternative: [h3 example.com:443] at 192.0.2.1 failed: timed out "
+                         "after 10000ms\n"));
+}
+
+TEST(Output, HasTheAlternativeServiceOfEachAddressBelowIt)
+{
+   const Result result{.host = "example.com",
+                       .outcome = Outcome::answered,
+                       .replies = {{.address = "2001:db8::1",
+                                    .status = 200,
+                                    .fields = {{"server", "a"}},
+                                    .alt_svc = AltSvcReply{.route = "h3 example.com:443",
+                                                           .address = "2001:db8::1",
+                                                           .status = 301,
+                                                           .location = "/b",
+                                                           .fields = {{"server", "b"}}}},
+                                   {.address = "192.0.2.1", .status = 200}}};
+
+   EXPECT_EQ(format_result(result, {.all_headers = true}),
+             "example.com: answered\n"
+             "  address: 2001:db8::1 200\n"
+             "    server: a\n"
+             "    alternative: [h3 example.com:443] 301 -> /b\n"
+             "      server: b\n"
+             "  address: 192.0.2.1 200\n");
+}

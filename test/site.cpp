@@ -69,6 +69,8 @@ Site::Site(const capy::any_executor& executor) : requests_(std::make_shared<std:
          fields.set(http::field::content_type, page.content_type);
          if (!page.location.empty())
             fields.set(http::field::location, page.location);
+         for (const auto& [name, value] : page.fields)
+            fields.append(name, value);
 
          if (auto [ec] = co_await response.submit(page.status, std::move(fields)); ec)
             co_return;

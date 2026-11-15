@@ -126,3 +126,8 @@ add_test(NAME http_probe_shows_the_turns_of_the_event_loop_with_vv
          COMMAND http-probe -vv --dns-server 127.0.0.1:1 localhost)
 set_tests_properties(http_probe_shows_the_turns_of_the_event_loop_with_vv PROPERTIES
     PASS_REGULAR_EXPRESSION "--- 0 ---")
+
+add_test(NAME http_probe_refuses_alt_svc_with_dns_only
+         COMMAND http-probe --alt-svc --dns-only localhost)
+set_tests_properties(http_probe_refuses_alt_svc_with_dns_only PROPERTIES
+    PASS_REGULAR_EXPRESSION "rules out --alt-svc")

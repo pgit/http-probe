@@ -450,3 +450,169 @@ TEST(Plan, LeavesOutNeitherANameThatDoesNotExistNorOneThatWasNotLookedUp)
       EXPECT_FALSE(plan.out_of_reach);
    }
 }
+
+// =================================================================================================
+// Alt-Svc
+// =================================================================================================
+
+namespace
+{
+
+std::vector<std::string> parsed(std::string_view value, std::vector<std::string>* skipped = nullptr)
+{
+   std::vector<std::string> ignored;
+   std::vector<std::string> result;
+   for (const auto& alternative : parse_alt_svc(value, skipped ? *skipped : ignored))
+      result.push_back(alternative.to_string());
+   return result;
+}
+
+std::vector<AltService> alternatives(std::string_view value)
+{
+   std::vector<std::string> skipped;
+   auto result = parse_alt_svc(value, skipped);
+   EXPECT_THAT(skipped, IsEmpty());
+   return result;
+}
+
+Route tcp(std::uint16_t port = 443)
+{
+   return {.protocol = anyhttp::Protocol::h2, .host = "example.com", .port = port};
+}
+
+} // namespace
+
+TEST(ParseAltSvc, TakesTheAlternativesInTheOrderTheyCome)
+{
+   EXPECT_THAT(parsed(R"(h3=":443"; ma=86400, h2="alt.example.com:8443")"),
+               ElementsAre(R"(h3=":443")", R"(h2="alt.example.com:8443")"));
+}
+
+TEST(ParseAltSvc, LeavesTheParametersAlone)
+{
+   EXPECT_THAT(parsed(R"(h3=":443"; ma=2592000; persist=1, h2=":444";x="a, b; c")"),
+               ElementsAre(R"(h3=":443")", R"(h2=":444")"));
+}
+
+TEST(ParseAltSvc, HasNoneForClear)
+{
+   EXPECT_THAT(parsed("clear"), IsEmpty());
+   EXPECT_THAT(parsed(R"(h3=":443", clear)"), IsEmpty());
+}
+
+TEST(ParseAltSvc, DecodesTheProtocolId)
+{
+   EXPECT_EQ(alternatives(R"(http%2F1.1=":443")").at(0).protocol_id, "http/1.1");
+}
+
+TEST(ParseAltSvc, TakesAnIPv6LiteralForTheHost)
+{
+   const auto result = alternatives(R"(h2="[2001:db8::1]:443")");
+   ASSERT_EQ(result.size(), 1u);
+   EXPECT_EQ(result[0].host, "[2001:db8::1]");
+   EXPECT_EQ(result[0].port, 443);
+}
+
+TEST(ParseAltSvc, TakesQuotedPairsInTheAuthority)
+{
+   EXPECT_EQ(alternatives(R"(h3="\:\443")").at(0).port, 443);
+}
+
+TEST(ParseAltSvc, SkipsWhatDoesNotParseAndSaysSo)
+{
+   std::vector<std::string> skipped;
+   EXPECT_THAT(parsed(R"(h3=":443", h3=:443, h3="", h3=":0", h3=":65536", h3=":x", ="":443, )"
+                      R"(h3=":443" junk, h%2=":443", h3=":443)",
+                      &skipped),
+               ElementsAre(R"(h3=":443")"));
+   EXPECT_EQ(skipped.size(), 9u);
+   EXPECT_EQ(skipped.at(0), "h3=:443");
+}
+
+TEST(ParseAltSvc, SkipsEmptyElements)
+{
+   std::vector<std::string> skipped;
+   EXPECT_THAT(parsed(R"(, h3=":443" ,,)", &skipped), ElementsAre(R"(h3=":443")"));
+   EXPECT_THAT(skipped, IsEmpty());
+}
+
+// -------------------------------------------------------------------------------------------------
+
+TEST(PlanAltSvc, TakesTheFirstThatIsNotTriedYet)
+{
+   const auto plan = plan_alt_svc("example.com", alternatives(R"(h3=":443", h3=":8443")"), {tcp()});
+
+   ASSERT_TRUE(plan.route);
+   EXPECT_EQ(plan.route->to_string(), "h3 example.com:443");
+   EXPECT_EQ(plan.route->source, R"(Alt-Svc h3=":443")");
+   EXPECT_THAT(plan.rejected, IsEmpty());
+}
+
+TEST(PlanAltSvc, TakesTheHostsOwnNameSpelledOut)
+{
+   const auto plan = plan_alt_svc("example.com", alternatives(R"(h3="EXAMPLE.com.:443")"), {tcp()});
+
+   ASSERT_TRUE(plan.route);
+   EXPECT_EQ(plan.route->to_string(), "h3 example.com:443");
+}
+
+TEST(PlanAltSvc, AsksNoOtherHost)
+{
+   const auto plan = plan_alt_svc(
+      "example.com", alternatives(R"(h3="alt.example.com:443", h3="[2001:db8::1]:443")"), {tcp()});
+
+   EXPECT_FALSE(plan.route);
+   ASSERT_EQ(plan.rejected.size(), 2u);
+   EXPECT_THAT(plan.rejected[0], HasSubstr("'alt.example.com' is not the host"));
+}
+
+TEST(PlanAltSvc, DoesNotGoBackToAnEndpointThatWasTried)
+{
+   const Route quic{.protocol = anyhttp::Protocol::h3, .host = "example.com", .port = 443};
+
+   const auto plan = plan_alt_svc(
+      "example.com", alternatives(R"(h3=":443", h2=":443", http%2F1.1=":443")"), {quic, tcp()});
+
+   EXPECT_FALSE(plan.route);
+   EXPECT_THAT(plan.rejected,
+               ElementsAre(R"(Alt-Svc h3=":443": tried already, as h3 example.com:443)",
+                           R"(Alt-Svc h2=":443": tried already, as h2 example.com:443)",
+                           R"(Alt-Svc http/1.1=":443": tried already, as h2 example.com:443)"));
+}
+
+TEST(PlanAltSvc, GoesOverTcpToAnotherPort)
+{
+   const auto plan = plan_alt_svc("example.com", alternatives(R"(h2=":8443")"), {tcp()});
+
+   ASSERT_TRUE(plan.route);
+   EXPECT_EQ(plan.route->to_string(), "h2 example.com:8443");
+}
+
+TEST(PlanAltSvc, PassesOverWhatAnyhttpDoesNotSpeak)
+{
+   const auto plan =
+      plan_alt_svc("example.com", alternatives(R"(h3-29=":443", quic=":443", h3=":443")"), {tcp()});
+
+   ASSERT_TRUE(plan.route);
+   EXPECT_EQ(plan.route->to_string(), "h3 example.com:443");
+   ASSERT_EQ(plan.rejected.size(), 2u);
+   EXPECT_THAT(plan.rejected[0], HasSubstr("no protocol that anyhttp speaks"));
+}
+
+TEST(PlanAltSvc, SpeaksOnlyTheProtocolsGiven)
+{
+   const auto plan =
+      plan_alt_svc("example.com", alternatives(R"(h3=":443", h2=":8443")"), {tcp()}, {.h2 = true});
+
+   ASSERT_TRUE(plan.route);
+   EXPECT_EQ(plan.route->to_string(), "h2 example.com:8443");
+   EXPECT_THAT(plan.rejected, ElementsAre(R"(Alt-Svc h3=":443": not h2)"));
+}
+
+TEST(PlanAltSvc, HasNothingToDoWithoutAlternatives)
+{
+   const auto plan = plan_alt_svc("example.com", {}, {tcp()});
+
+   EXPECT_FALSE(plan.route);
+   EXPECT_THAT(plan.rejected, IsEmpty());
+}

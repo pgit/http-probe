@@ -100,6 +100,147 @@ Service parse_service(const c_ares_async::https_record& record)
 
 bool is_own_name(std::string_view target) { return target.empty() || target == "."; }
 
+// -------------------------------------------------------------------------------------------------
+
+constexpr std::string_view whitespace = " \t";
+
+std::string_view trim(std::string_view text)
+{
+   const auto first = text.find_first_not_of(whitespace);
+   if (first == text.npos)
+      return {};
+   return text.substr(first, text.find_last_not_of(whitespace) - first + 1);
+}
+
+//
+// The elements of a list in a field (RFC 9110, section 5.6.1), split at the commas that are not
+// in a quoted string.
+//
+std::vector<std::string_view> split_field_list(std::string_view list)
+{
+   std::vector<std::string_view> elements;
+   bool quoted = false;
+   std::size_t start = 0;
+   for (std::size_t i = 0; i < list.size(); ++i)
+   {
+      if (quoted && list[i] == '\\')
+         ++i;
+      else if (list[i] == '"')
+         quoted = !quoted;
+      else if (!quoted && list[i] == ',')
+      {
+         elements.push_back(list.substr(start, i - start));
+         start = i + 1;
+      }
+   }
+   elements.push_back(list.substr(start));
+   return elements;
+}
+
+bool is_tchar(unsigned char c)
+{
+   return std::isalnum(c) != 0 ||
+          std::string_view("!#$%&'*+-.^_`|~").find(static_cast<char>(c)) != std::string_view::npos;
+}
+
+//
+// A protocol-id is a token with anything else in it percent-encoded (RFC 7838, section 3).
+//
+std::optional<std::string> percent_decode(std::string_view text)
+{
+   std::string decoded;
+   for (std::size_t i = 0; i < text.size(); ++i)
+   {
+      if (text[i] != '%')
+      {
+         decoded += text[i];
+         continue;
+      }
+      unsigned value = 0;
+      if (i + 2 >= text.size())
+         return std::nullopt;
+      const auto [end, ec] = std::from_chars(text.data() + i + 1, text.data() + i + 3, value, 16);
+      if (ec != std::errc{} || end != text.data() + i + 3)
+         return std::nullopt;
+      decoded += static_cast<char>(value);
+      i += 2;
+   }
+   return decoded;
+}
+
+//
+// One alternative: protocol-id "=" alt-authority, with any parameters after it left alone.
+//
+std::optional<AltService> parse_alternative(std::string_view element)
+{
+   const auto equals = element.find('=');
+   if (equals == 0 || equals == element.npos ||
+       !std::ranges::all_of(element.substr(0, equals), is_tchar))
+      return std::nullopt;
+   auto protocol_id = percent_decode(element.substr(0, equals));
+   if (!protocol_id)
+      return std::nullopt;
+
+   //
+   // The authority is a quoted-string, which may have quoted pairs in it.
+   //
+   auto rest = element.substr(equals + 1);
+   if (!rest.starts_with('"'))
+      return std::nullopt;
+   std::string authority;
+   std::size_t i = 1;
+   for (; i < rest.size() && rest[i] != '"'; ++i)
+   {
+      if (rest[i] == '\\' && ++i == rest.size())
+         return std::nullopt;
+      authority += rest[i];
+   }
+   if (i == rest.size())
+      return std::nullopt;
+
+   if (const auto parameters = trim(rest.substr(i + 1));
+       !parameters.empty() && !parameters.starts_with(';'))
+      return std::nullopt;
+
+   //
+   // [uri-host] ":" port, where the host may be an IPv6 literal with colons of its own.
+   //
+   const auto colon = authority.rfind(':');
+   if (colon == authority.npos)
+      return std::nullopt;
+   const std::string_view port_text = std::string_view(authority).substr(colon + 1);
+   std::uint16_t port = 0;
+   const auto [end, ec] =
+      std::from_chars(port_text.data(), port_text.data() + port_text.size(), port);
+   if (ec != std::errc{} || end != port_text.data() + port_text.size() || port == 0)
+      return std::nullopt;
+
+   return AltService{
+      .protocol_id = std::move(*protocol_id), .host = authority.substr(0, colon), .port = port};
+}
+
+std::optional<anyhttp::Protocol> alt_svc_protocol(std::string_view protocol_id)
+{
+   using enum anyhttp::Protocol;
+   if (protocol_id == "h3")
+      return h3;
+   if (protocol_id == "h2")
+      return h2;
+   if (protocol_id == "http/1.1")
+      return h1;
+   return std::nullopt;
+}
+
+//
+// Where a connection goes, as far as the host stays the same: QUIC or TCP, and the port. Over TCP,
+// it is up to the server which of HTTP/2 and HTTP/1.1 it speaks.
+//
+bool same_endpoint(const Route& a, const Route& b)
+{
+   using enum anyhttp::Protocol;
+   return (a.protocol == h3) == (b.protocol == h3) && a.port == b.port;
+}
+
 // =================================================================================================
 
 } // namespace
@@ -269,6 +410,72 @@ Plan plan_routes(std::string_view host, const ServiceRecords& found, const Proto
                                .host = std::string(host),
                                .port = default_port,
                                .source = "no usable HTTPS record"});
+   return plan;
+}
+
+// -------------------------------------------------------------------------------------------------
+
+std::string AltService::to_string() const
+{
+   return std::format("{}=\"{}:{}\"", protocol_id, host, port);
+}
+
+std::vector<AltService> parse_alt_svc(std::string_view value, std::vector<std::string>& skipped)
+{
+   std::vector<AltService> alternatives;
+   for (const auto element : split_field_list(value) | std::views::transform(trim))
+   {
+      if (element.empty())
+         continue;
+      if (element == "clear")
+         return {}; // whatever else there is, the server wants none of it
+      if (auto alternative = parse_alternative(element))
+         alternatives.push_back(std::move(*alternative));
+      else
+         skipped.emplace_back(element);
+   }
+   return alternatives;
+}
+
+AltSvcPlan plan_alt_svc(std::string_view host, const std::vector<AltService>& alternatives,
+                        const std::vector<Route>& tried, const Protocols& protocols)
+{
+   AltSvcPlan plan;
+   for (const auto& alternative : alternatives)
+   {
+      const auto text = std::format("Alt-Svc {}", alternative.to_string());
+      const auto protocol = alt_svc_protocol(alternative.protocol_id);
+      if (!protocol)
+      {
+         plan.rejected.push_back(std::format("{}: no protocol that anyhttp speaks", text));
+         continue;
+      }
+      if (!protocols.speaks(*protocol))
+      {
+         plan.rejected.push_back(std::format("{}: not {}", text, protocols.to_string()));
+         continue;
+      }
+      if (!alternative.host.empty() && normalize_host(alternative.host) != host)
+      {
+         plan.rejected.push_back(std::format("{}: '{}' is not the host, and no other host is asked",
+                                             text, alternative.host));
+         continue;
+      }
+
+      Route route{.protocol = *protocol,
+                  .host = std::string(host),
+                  .port = alternative.port,
+                  .source = text};
+      const auto same = [&](const Route& other) { return same_endpoint(route, other); };
+      if (const auto it = std::ranges::find_if(tried, same); it != tried.end())
+      {
+         plan.rejected.push_back(std::format("{}: tried already, as {}", text, it->to_string()));
+         continue;
+      }
+
+      plan.route = std::move(route);
+      return plan;
+   }
    return plan;
 }
 
