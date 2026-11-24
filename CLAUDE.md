@@ -1,7 +1,7 @@
 # Working on http-probe
 
-It requests `https://<host>/` once per host and reports what came back, connecting the way the
-host's HTTPS records say. It is built on two libraries of the same author, each in a repository of
+It requests `https://<host>/` once per host, or the path of `--path`, and reports what came back,
+connecting the way the host's HTTPS records say. It is built on two libraries of the same author, each in a repository of
 its own: anyhttp for HTTP and c-ares-async for DNS.
 [README.md](README.md) has the build commands.
 
@@ -9,11 +9,13 @@ its own: anyhttp for HTTP and c-ares-async for DNS.
 
 These hold for all code in this repository, including tests and experiments.
 
-- **One request per hostname, but if explicitly enabled, also one request per IP, and nothing
-  more.** c-ares-async's lists of hosts are fine as input here, which is what makes this rule
-  matter: they have 1000 mixed sites, some adult or spam-looking. So nothing is followed: no links,
-  no redirects and no Alt-Svc. Another route is for a connection that failed: once a request has
-  gone out, that was it for the hostname, or for the IP if enabled, however it ended.
+- **One request per hostname by default, and never more than one per endpoint.** c-ares-async's
+  lists of hosts are fine as input here, which is what makes this rule matter: they have 1000 mixed
+  sites, some adult or spam-looking. Exceptions are opt-in, each with an option of its own, and stay
+  on the host's own name: `--each-address` asks each IP, and `--alt-svc` asks the one alternative
+  service a response names, at the same IP. Nothing else is followed: no links, no redirects, no
+  other hosts. Another route is for a connection that failed: once a request has gone out, that was
+  it for the endpoint, however it ended.
 - **Tests connect to local servers on loopback only.**
 - **If the program ever crawls, it refuses to run without an explicit host allowlist,** with
   robots.txt and per-host rate limits built in from the start, not added later.

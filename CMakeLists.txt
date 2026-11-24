@@ -28,8 +28,8 @@ endif()
 # I/O runtime: Capy and Corosio, and only those. The libraries take either, which is their business:
 # this is a program, and it gets to decide. These shadow the cache entries of the libraries, which
 # go on saying ASIO in CMakeCache.txt. c-ares-async is headers, and its runtime is the target a
-# program links, c_ares_async::corosio here; its option only has it look for Corosio rather than
-# insist on Asio.
+# program links, c_ares_async::corosio here, by way of c_ares_async::doq below; its option only has
+# it look for Corosio rather than insist on Asio.
 #
 set(ANYHTTP_API COROSIO)
 set(C_ARES_ASYNC_API ${ANYHTTP_API})
@@ -41,6 +41,15 @@ set(C_ARES_ASYNC_API ${ANYHTTP_API})
 set(TLS_LIBRARY OpenSSL)
 set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
 
+#
+# DNS over QUIC, for --doq. c-ares-async does it with anyhttp's QUIC, and takes the anyhttp that is
+# there already when it is configured: the one above, on the same runtime and TLS library. The
+# target for it is c_ares_async::doq, which is c_ares_async::corosio with anyhttp and a macro that
+# changes the resolver's constructor, so every translation unit that makes a resolver has to have
+# it, the DNS server of the tests included.
+#
+set(C_ARES_ASYNC_DOQ ON)
+
 # --------------------------------------------------------------------------------------------------
 
 #
@@ -50,25 +59,26 @@ set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
 include(FetchContent)
 FetchContent_Declare(anyhttp
     GIT_REPOSITORY https://github.com/pgit/anyhttp.git
-    GIT_TAG bc985a0e040d8b2dd027552b964bde19b0fbf38a
+    GIT_TAG 132c526c77994447a4d9bf9bc15800e9caa71476
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
-    GIT_TAG 2bbeb48fcd7ca539fc1c6f3fc580984cde7ada4b
+    GIT_TAG 1e57e294bed549e076ac739567d35144d2dd774b
     SYSTEM)
 
 #
 # Both libraries pin these as well. The first declaration wins, so these are the ones both of them
-# get, and here they are SYSTEM, too. They are anyhttp's pins, and c-ares-async has the same.
+# get, and here they are SYSTEM, too. They are anyhttp's pins, which Boost.HTTP in anyhttp has to
+# build against, and c-ares-async pins the same pair.
 #
 FetchContent_Declare(capy
     GIT_REPOSITORY https://github.com/cppalliance/capy.git
-    GIT_TAG bdadc6adef8c8eb79da6454373175bb1428be524
+    GIT_TAG 07ecb34749d2f9cbf8456b370d6aca69ab6b39b7
     EXCLUDE_FROM_ALL
     SYSTEM)
 FetchContent_Declare(corosio
     GIT_REPOSITORY https://github.com/cppalliance/corosio.git
-    GIT_TAG fd8e95a7125047d5385068a4c640da8232b9588e
+    GIT_TAG 2d246de82c62a62d0da9c1e4c81a1865be7f9321
     EXCLUDE_FROM_ALL
     SYSTEM)
 
@@ -87,7 +97,7 @@ set(http_probe_warnings -Wall -Wextra -Werror -Wno-missing-designated-field-init
 
 add_library(http_probe_core STATIC src/output.cpp src/prober.cpp src/routes.cpp)
 target_include_directories(http_probe_core PUBLIC src)
-target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::corosio)
+target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::doq)
 target_compile_options(http_probe_core PRIVATE ${http_probe_warnings})
 
 add_executable(http-probe src/main.cpp)

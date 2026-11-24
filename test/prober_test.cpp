@@ -140,8 +140,29 @@ protected:
             context.stop();
          })(run());
       context.run();
+      stats = prober.stats();
       if (failed)
          std::rethrow_exception(failed);
+   }
+
+   //
+   // That a request goes out for the path of the configuration, query and all, over the protocol
+   // of the record, and for nothing else.
+   //
+   void expect_path_over(std::vector<fake_dns_server::svc_param> params)
+   {
+      site.dns().add_https("localhost", 1, ".", std::move(params));
+      site.page("/", {.body = "not asked for"});
+      site.page("/robots.txt", {.body = "User-agent: *"});
+
+      auto configuration = config();
+      configuration.path = "/robots.txt?a=1&b=%20";
+      probe(std::move(configuration));
+
+      ASSERT_EQ(results.size(), 1u);
+      EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+      EXPECT_EQ(results[0].body_size, 13u);
+      EXPECT_THAT(site.targets(), ElementsAre("/robots.txt?a=1&b=%20"));
    }
 
    //
@@ -191,6 +212,7 @@ protected:
    corosio::io_context context;
    Site site{context.get_executor()};
    std::vector<Result> results;
+   Stats stats; ///< of the last probe()
 };
 
 } // namespace
@@ -218,6 +240,18 @@ TEST_F(Probe, RefusesAnythingButAHostName)
    for (const auto* host : {"https://localhost/", "localhost/x", "localhost:443", "*.localhost",
                             "user@localhost", "", "127.0.0.1", "::1"})
       EXPECT_THROW(probe(config({host})), std::invalid_argument) << host;
+   finish();
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(Probe, RefusesAPathThatIsNotOne)
+{
+   for (const auto* path : {"", "robots.txt", "/a b", "/a#b", "https://localhost/", "*", "/\\"})
+   {
+      auto configuration = config();
+      configuration.path = path;
+      EXPECT_THROW(probe(std::move(configuration)), std::invalid_argument) << path;
+   }
    finish();
    EXPECT_THAT(site.requests(), IsEmpty());
 }
@@ -287,6 +321,15 @@ TEST_F(Probe, RequestsNothingButTheRoot)
 
    EXPECT_THAT(site.targets(), ElementsAre("/"));
 }
+
+//
+// Each protocol makes the request target of its own, so this goes for all three of them.
+//
+TEST_F(Probe, RequestsThePathItIsToldToOverHttp3) { expect_path_over(h3_at(site.port())); }
+
+TEST_F(Probe, RequestsThePathItIsToldToOverHttp2) { expect_path_over(h2_at(site.port())); }
+
+TEST_F(Probe, RequestsThePathItIsToldToOverHttp1) { expect_path_over(h1_at(site.port())); }
 
 TEST_F(Probe, ReportsARedirectAndDoesNotFollowIt)
 {
@@ -895,6 +938,234 @@ TEST_F(Probe, KeepsAnyhttpOutOfALoggerOfItsOwn)
    EXPECT_THAT(own_log.str(), Not(HasSubstr("GET https://localhost/")));
    EXPECT_THAT(library_log.str(), HasSubstr("GET https://localhost/"));
    EXPECT_THAT(library_log.str(), Not(HasSubstr("asking for the HTTPS records")));
+}
+
+namespace
+{
+
+//
+// The TLS key log, in a file of its own for each test. Only the client writes to it: the site's
+// server has none.
+//
+class KeyLog : public Probe
+{
+protected:
+   void TearDown() override { std::filesystem::remove(file); }
+
+   Config config_with_keylog(std::vector<fake_dns_server::svc_param> params)
+   {
+      site.dns().add_https("localhost", 1, ".", std::move(params));
+      site.page("/", {.body = "hello"});
+      auto configuration = config();
+      configuration.tls_keylog_file = file.string();
+      return configuration;
+   }
+
+   /// The lines of the key log, each split into its label, client random and secret.
+   std::vector<std::vector<std::string>> lines() const
+   {
+      std::vector<std::vector<std::string>> lines;
+      std::ifstream in(file);
+      for (std::string line; std::getline(in, line);)
+      {
+         std::istringstream fields(line);
+         auto& split = lines.emplace_back();
+         for (std::string field; fields >> field;)
+            split.push_back(field);
+      }
+      return lines;
+   }
+
+   std::filesystem::path file =
+      std::filesystem::temp_directory_path() /
+      std::format("http-probe-test-keylog-{}-{}", ::getpid(),
+                  testing::UnitTest::GetInstance()->current_test_info()->name());
+};
+
+} // namespace
+
+TEST_F(KeyLog, HasTheSecretsOfAnHttp3Connection)
+{
+   probe(config_with_keylog(h3_at(site.port())));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+
+   //
+   // What Wireshark needs for the traffic of TLS 1.3, which is all that QUIC speaks, all of one
+   // handshake and so with the same client random.
+   //
+   const auto logged = lines();
+   std::set<std::string> labels, randoms;
+   for (const auto& line : logged)
+   {
+      ASSERT_EQ(line.size(), 3u);
+      labels.insert(line[0]);
+      randoms.insert(line[1]);
+      EXPECT_EQ(line[1].size(), 64u) << "32 bytes in hex";
+   }
+   EXPECT_THAT(labels, Contains("CLIENT_HANDSHAKE_TRAFFIC_SECRET"));
+   EXPECT_THAT(labels, Contains("SERVER_HANDSHAKE_TRAFFIC_SECRET"));
+   EXPECT_THAT(labels, Contains("CLIENT_TRAFFIC_SECRET_0"));
+   EXPECT_THAT(labels, Contains("SERVER_TRAFFIC_SECRET_0"));
+   EXPECT_EQ(randoms.size(), 1u);
+
+   const auto permissions = std::filesystem::status(file).permissions();
+   EXPECT_EQ(permissions & std::filesystem::perms::all,
+             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write)
+      << "whoever can read it can read the traffic";
+}
+
+TEST_F(KeyLog, AppendsToWhatIsThere)
+{
+   std::ofstream(file) << "# an earlier run\n";
+   probe(config_with_keylog(h3_at(site.port())));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+   const auto logged = lines();
+   ASSERT_GT(logged.size(), 1u);
+   EXPECT_THAT(logged[0], ElementsAre("#", "an", "earlier", "run"));
+   EXPECT_EQ(logged[1].size(), 3u);
+}
+
+//
+// corosio's TLS stream does not hand out what a key log needs, and anyhttp goes on without one.
+// When that changes, so does this test, and the note in main.cpp with it.
+//
+TEST_F(KeyLog, HasNothingOfTlsOverTcp)
+{
+   probe(config_with_keylog(h2_at(site.port())));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h2 localhost:{}", site.port()));
+   EXPECT_TRUE(std::filesystem::exists(file));
+   EXPECT_THAT(lines(), IsEmpty());
+}
+
+TEST_F(KeyLog, RefusesOneThatCanNotBeWritten)
+{
+   auto configuration = config_with_keylog(h3_at(site.port()));
+   configuration.tls_keylog_file = "/nonexistent/keylog";
+   EXPECT_THROW(probe(std::move(configuration)), std::invalid_argument);
+   finish();
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(KeyLog, IsNotOpenedWithDnsOnly)
+{
+   auto configuration = config_with_keylog(h3_at(site.port()));
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(std::filesystem::exists(file)) << "nothing to log, as nothing is connected to";
+}
+
+// =================================================================================================
+// What is counted
+// =================================================================================================
+
+TEST_F(Probe, CountsTheLookupsTheRequestAndWhatCameBack)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   probe(config());
+
+   EXPECT_EQ(stats.https_lookups, 1u);
+   EXPECT_EQ(stats.address_lookups, 1u);
+   EXPECT_EQ(stats.attempts, 1u);
+   EXPECT_EQ(stats.requests, 1u);
+   EXPECT_EQ(stats.responses, 1u);
+   EXPECT_EQ(stats.timeouts, 0u);
+   EXPECT_THAT(stats.status_classes, ElementsAre(Pair(2, 1u)));
+   EXPECT_THAT(stats.protocols, ElementsAre(Pair(anyhttp::Protocol::h3, 1u)));
+   EXPECT_EQ(stats.body_bytes, 5u);
+   EXPECT_GT(stats.header_bytes, std::string_view("content-type: text/html").size());
+   ASSERT_EQ(stats.durations.size(), 1u);
+   EXPECT_EQ(stats.durations[0], results.at(0).duration);
+   EXPECT_GE(stats.elapsed, stats.durations[0]);
+}
+
+TEST_F(Probe, CountsTheHeaderBytesOverTcpAsWell)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.status = 404});
+
+   probe(config());
+
+   EXPECT_EQ(stats.requests, 1u);
+   EXPECT_THAT(stats.protocols, ElementsAre(Pair(anyhttp::Protocol::h2, 1u)));
+   EXPECT_THAT(stats.status_classes, ElementsAre(Pair(4, 1u)));
+   EXPECT_GT(stats.header_bytes, std::string_view("HTTP/1.1 404 Not Found\r\n").size());
+}
+
+TEST_F(Probe, CountsAnAttemptThatTimedOutBeforeTheRequest)
+{
+   auto silent = silent_udp_socket();
+   site.dns().add_https("localhost", 1, ".", h3_at(silent.local_endpoint().port()));
+   site.dns().add_https("localhost", 2, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   probe(std::move(configuration));
+
+   EXPECT_EQ(stats.attempts, 2u);
+   EXPECT_EQ(stats.timeouts, 1u);
+   EXPECT_EQ(stats.requests, 1u);
+   EXPECT_EQ(stats.responses, 1u);
+}
+
+TEST_F(Probe, CountsARequestThatTimedOutWithoutAResponse)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "too late", .delay = 400ms});
+
+   auto configuration = config();
+   configuration.timeout = 100ms;
+   probe(std::move(configuration));
+
+   EXPECT_EQ(stats.attempts, 1u);
+   EXPECT_EQ(stats.requests, 1u);
+   EXPECT_EQ(stats.timeouts, 1u);
+   EXPECT_EQ(stats.responses, 0u);
+   EXPECT_EQ(stats.body_bytes, 0u);
+   EXPECT_THAT(stats.durations, IsEmpty());
+}
+
+TEST_F(Probe, CountsARequestToEachAddress)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   const auto addresses = results[0].replies.size();
+   EXPECT_GE(addresses, 1u);
+   EXPECT_EQ(stats.address_lookups, 1u);
+   EXPECT_EQ(stats.requests, site.requests().size());
+   EXPECT_EQ(stats.attempts, addresses);
+}
+
+TEST_F(Probe, CountsOnlyTheLookupsWithDnsOnly)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+
+   auto configuration = config();
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   EXPECT_EQ(stats.https_lookups, 1u);
+   EXPECT_EQ(stats.address_lookups, 1u);
+   EXPECT_EQ(stats.attempts, 0u);
+   EXPECT_EQ(stats.requests, 0u);
+   EXPECT_THAT(site.requests(), IsEmpty());
 }
 
 // =================================================================================================
@@ -1572,6 +1843,263 @@ TEST_F(Probe, EachAddressDoesNotGoWithDnsOnly)
 }
 
 // =================================================================================================
+// --alt-svc
+// =================================================================================================
+
+namespace
+{
+
+std::pair<std::string, std::string> alt_svc(std::string value)
+{
+   return {"alt-svc", std::move(value)};
+}
+
+} // namespace
+
+TEST_F(Probe, DoesNotFollowAltSvcWithoutBeingToldTo)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   probe(config());
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcSendsOneRequestMoreToTheAlternative)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   const auto& result = results[0];
+   EXPECT_EQ(result.outcome, Result::Outcome::answered) << notes(result);
+   EXPECT_EQ(result.route, std::format("h2 localhost:{}", site.port()));
+   ASSERT_TRUE(result.alt_svc) << notes(result);
+   EXPECT_EQ(result.alt_svc->route, std::format("h3 localhost:{}", site.port()));
+   EXPECT_EQ(result.alt_svc->address, result.address) << "the same address";
+   EXPECT_EQ(result.alt_svc->status, 200) << result.alt_svc->error;
+   EXPECT_EQ(result.alt_svc->reason, "OK");
+   EXPECT_THAT(result.alt_svc->fields, Contains(Pair("content-type", "text/html")));
+   EXPECT_THAT(result.alt_svc->error, IsEmpty());
+
+   ASSERT_EQ(site.requests().size(), 2u);
+   EXPECT_EQ(site.requests()[1].authority, "localhost") << "the host, not where it went";
+   EXPECT_EQ(stats.requests, 2u);
+   EXPECT_EQ(stats.responses, 2u);
+   EXPECT_THAT(stats.protocols,
+               ElementsAre(Pair(anyhttp::Protocol::h2, 1u), Pair(anyhttp::Protocol::h3, 1u)));
+}
+
+TEST_F(Probe, AltSvcAsksForTheRootAgainAfterARedirect)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.status = 301,
+                   .location = "/moved",
+                   .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+   site.page("/moved", {.body = "not asked for"});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   ASSERT_TRUE(results[0].alt_svc) << notes(results[0]);
+   EXPECT_EQ(results[0].alt_svc->status, 301) << results[0].alt_svc->error;
+   EXPECT_EQ(results[0].alt_svc->location, "/moved");
+   EXPECT_THAT(site.targets(), ElementsAre("/", "/"));
+}
+
+TEST_F(Probe, AltSvcAsksForTheSamePath)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/robots.txt", {.body = "User-agent: *",
+                             .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   configuration.path = "/robots.txt?x";
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   ASSERT_TRUE(results[0].alt_svc) << notes(results[0]);
+   EXPECT_EQ(results[0].alt_svc->status, 200) << results[0].alt_svc->error;
+   EXPECT_THAT(site.targets(), ElementsAre("/robots.txt?x", "/robots.txt?x"));
+}
+
+TEST_F(Probe, AltSvcDoesNotGoBackToTheRouteOfTheResponse)
+{
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("tried already"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcDoesNotGoBackToARouteThatCouldNotBeConnectedTo)
+{
+   auto silent = silent_udp_socket();
+   const auto silent_port = silent.local_endpoint().port();
+   site.dns().add_https("localhost", 1, ".", h3_at(silent_port));
+   site.dns().add_https("localhost", 2, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", silent_port))}});
+
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("tried already"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcAsksNoOtherHost)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.dns().add_address("elsewhere.example.test", "127.0.0.1");
+   site.page("/",
+             {.body = "hello",
+              .fields = {alt_svc(std::format(R"(h3="elsewhere.example.test:{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("is not the host"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+   EXPECT_EQ(site.dns_queries("elsewhere.example.test"), 0u);
+}
+
+TEST_F(Probe, AltSvcReportsAFailureAndKeepsTheOutcomeOfTheFirstRequest)
+{
+   auto silent = silent_udp_socket();
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/",
+             {.body = "hello",
+              .fields = {alt_svc(std::format(R"(h3=":{}")", silent.local_endpoint().port()))}});
+
+   auto configuration = config();
+   configuration.timeout = 200ms;
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].status, 200);
+   ASSERT_TRUE(results[0].alt_svc) << notes(results[0]);
+   EXPECT_THAT(results[0].alt_svc->error, HasSubstr("timed out"));
+   EXPECT_EQ(site.requests().size(), 1u);
+   EXPECT_EQ(stats.attempts, 2u);
+}
+
+TEST_F(Probe, AltSvcFollowsOnlyTheFirstAlternativeItCanUse)
+{
+   auto silent = silent_tcp_acceptor();
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/",
+             {.body = "hello",
+              .fields = {alt_svc(std::format(R"(h3-29=":{0}", h3=":{0}"; ma=60)", site.port())),
+                         alt_svc(std::format(R"(h2=":{}")", silent.local_endpoint().port()))}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   ASSERT_TRUE(results[0].alt_svc) << notes(results[0]);
+   EXPECT_EQ(results[0].alt_svc->route, std::format("h3 localhost:{}", site.port()));
+   EXPECT_EQ(results[0].alt_svc->status, 200) << results[0].alt_svc->error;
+   EXPECT_THAT(notes(results[0]), HasSubstr("h3-29"));
+   EXPECT_THAT(notes(results[0]), Not(HasSubstr(std::to_string(silent.local_endpoint().port()))));
+   EXPECT_EQ(site.requests().size(), 2u);
+   EXPECT_EQ(stats.attempts, 2u);
+}
+
+TEST_F(Probe, AltSvcSpeaksOnlyTheProtocolsGiven)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.protocols = {.h2 = true};
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("not h2"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcSaysWhatDoesNotParse)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc("h3=443")}});
+
+   auto configuration = config();
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(results[0].alt_svc);
+   EXPECT_THAT(notes(results[0]), HasSubstr("Alt-Svc 'h3=443': does not parse"));
+   EXPECT_THAT(site.targets(), ElementsAre("/"));
+}
+
+TEST_F(Probe, AltSvcSendsOneRequestMoreToEachAddress)
+{
+   site.dns().add_https("localhost", 1, ".", h2_at(site.port()));
+   site.page("/", {.body = "hello", .fields = {alt_svc(std::format(R"(h3=":{}")", site.port()))}});
+
+   auto configuration = config();
+   configuration.each_address = true;
+   configuration.alt_svc = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_FALSE(results[0].alt_svc) << "that is in the replies";
+   ASSERT_THAT(results[0].replies, Not(IsEmpty()));
+   for (const auto& reply : results[0].replies)
+   {
+      ASSERT_TRUE(reply.alt_svc) << notes(results[0]);
+      EXPECT_EQ(reply.alt_svc->address, reply.address);
+      EXPECT_EQ(reply.alt_svc->route, std::format("h3 localhost:{}", site.port()));
+      EXPECT_EQ(reply.alt_svc->status, 200) << reply.alt_svc->error;
+   }
+   EXPECT_EQ(site.requests().size(), 2 * results[0].replies.size());
+}
+
+TEST_F(Probe, AltSvcDoesNotGoWithDnsOnly)
+{
+   auto configuration = config();
+   configuration.alt_svc = true;
+   configuration.dns_only = true;
+
+   EXPECT_THROW(Prober(context.get_executor(), std::move(configuration), [](const Result&) {}),
+                std::invalid_argument);
+   finish();
+}
+
+// =================================================================================================
 // --dot
 // =================================================================================================
 
@@ -1626,14 +2154,13 @@ protected:
       return configuration;
    }
 
-   /// A server of \p site, by the name that \ref names has for it.
-   Config config_by_name(const Site& server)
+   /// The DNS server at \p address, by the name that \ref names has for it.
+   Config config_by_name(std::string_view address)
    {
       names.dns().add_address("dns.test", "127.0.0.1");
 
       auto configuration = config();
-      const auto address = server.dns_address();
-      configuration.dns_server = "dns.test" + address.substr(address.rfind(':'));
+      configuration.dns_server = std::format("dns.test{}", address.substr(address.rfind(':')));
       configuration.dns_server_lookup = names.dns_address();
       return configuration;
    }
@@ -1703,7 +2230,7 @@ TEST_F(DnsOverTls, TakesTheNameToVerifyFromTheDnsServer)
 {
    trust_the_dns_server();
 
-   auto configuration = config_by_name(site);
+   auto configuration = config_by_name(site.dns_address());
    configuration.dns_tls.enabled = true;
    probe(std::move(configuration));
 
@@ -1719,7 +2246,7 @@ TEST_F(DnsOverTls, PrefersTheNameItIsGivenToTheOneOfTheDnsServer)
 {
    trust_the_dns_server();
 
-   auto configuration = config_by_name(site);
+   auto configuration = config_by_name(site.dns_address());
    configuration.dns_tls = {.enabled = true, .hostname = "other.test", .verify = true};
    probe(std::move(configuration));
 
@@ -1730,7 +2257,7 @@ TEST_F(DnsOverTls, PrefersTheNameItIsGivenToTheOneOfTheDnsServer)
 TEST_F(DnsOverTls, TakesADnsServerByNameWithoutDot)
 {
    names.dns().add_https("localhost", 1, ".", h3_at(site.port()));
-   probe(config_by_name(names));
+   probe(config_by_name(names.dns_address()));
 
    ASSERT_EQ(results.size(), 1u);
    EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
@@ -1805,6 +2332,142 @@ TEST(DnsOverTlsConnection, DoesNotKeepTheProgramFromEnding)
           .timeout = 1000ms,
           .dns_server = site.dns_address(),
           .dns_tls = {.enabled = true, .hostname = "", .verify = false},
+          .tls_ca_file = site.ca_file().string(),
+          .default_port = site.port()},
+         [&](const Result& result) { answered += result.outcome == Result::Outcome::answered; });
+      capy::run_async(context.get_executor())(prober.run());
+      context.run(); // what hangs if it does not end, for the timeout of the test to find
+
+      const auto stop = [](Site& site) -> capy::task<> {
+         site.stop();
+         co_return;
+      };
+      capy::run_async(site_context.get_executor())(stop(site));
+   }
+   EXPECT_EQ(answered, 1u);
+}
+
+// =================================================================================================
+// --doq
+// =================================================================================================
+
+namespace
+{
+
+//
+// The same, over QUIC. The DNS server answers on a port of its own for that, and on the runtime of
+// anyhttp, which is the context of the test, where the rest of it is on Asio.
+//
+class DnsOverQuic : public DnsOverTls
+{
+protected:
+   void SetUp() override
+   {
+      site.dns().use_quic(context.get_executor(), dns_certificate());
+      quiet(); // use_quic() lets anyhttp's warnings through
+      site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+      site.page("/", {.body = "hello"});
+   }
+
+   Config config_over_quic(std::string hostname, bool verify = true)
+   {
+      auto configuration = config();
+      configuration.dns_server = site.dns().quic_address();
+      configuration.dns_tls = {
+         .enabled = true, .quic = true, .hostname = std::move(hostname), .verify = verify};
+      return configuration;
+   }
+};
+
+} // namespace
+
+TEST_F(DnsOverQuic, AsksOverQuicAndNothingElse)
+{
+   trust_the_dns_server();
+   probe(config_over_quic("dns.test"));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_EQ(results[0].status, 200);
+   EXPECT_GE(site.dns_queries(fake_dns_server::transport::quic), 1u);
+   EXPECT_EQ(site.dns_queries(fake_dns_server::transport::udp), 0u);
+   EXPECT_EQ(site.dns_queries(fake_dns_server::transport::tcp), 0u);
+   EXPECT_EQ(site.dns_queries(fake_dns_server::transport::tls), 0u);
+}
+
+TEST_F(DnsOverQuic, DoesNotConnectIfTheCertificateIsForAnotherName)
+{
+   trust_the_dns_server();
+   probe(config_over_quic("other.test"));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(DnsOverQuic, DoesNotConnectIfTheCertificateIsNotTrusted)
+{
+   probe(config_over_quic("dns.test"));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::lookup_failed);
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(DnsOverQuic, SkipsTheCheckIfToldTo)
+{
+   probe(config_over_quic("", false));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_GE(site.dns_queries(fake_dns_server::transport::quic), 1u);
+}
+
+TEST_F(DnsOverQuic, TakesTheNameToVerifyFromTheDnsServer)
+{
+   trust_the_dns_server();
+
+   auto configuration = config_by_name(site.dns().quic_address());
+   configuration.dns_tls = {.enabled = true, .quic = true};
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].outcome, Result::Outcome::answered) << notes(results[0]);
+   EXPECT_GE(site.dns_queries(fake_dns_server::transport::quic), 1u);
+   EXPECT_EQ(names.dns_queries("dns.test"), names.dns_queries(fake_dns_server::transport::udp))
+      << "looking up the server is in the clear, and it is all that the other one was asked";
+   EXPECT_GE(names.dns_queries("dns.test"), 1u);
+}
+
+TEST_F(DnsOverQuic, RefusesAnAddressWithoutANameToVerify)
+{
+   EXPECT_THROW(probe(config_over_quic("")), std::invalid_argument);
+   finish();
+}
+
+//
+// As for TLS: the connection is kept for the next query, and still the program ends.
+//
+TEST(DnsOverQuicConnection, DoesNotKeepTheProgramFromEnding)
+{
+   corosio::io_context site_context;
+   Site site(site_context.get_executor());
+   site.dns().use_quic(site_context.get_executor(), dns_certificate());
+   spdlog::set_level(spdlog::level::off);
+   site.dns().add_https("localhost", 1, ".", h3_at(site.port()));
+   site.page("/", {.body = "hello"});
+
+   std::size_t answered = 0;
+   {
+      std::jthread serving([&] { site_context.run(); });
+
+      corosio::io_context context;
+      Prober prober(
+         context.get_executor(),
+         {.hosts = {"localhost"},
+          .timeout = 1000ms,
+          .dns_server = site.dns().quic_address(),
+          .dns_tls = {.enabled = true, .quic = true, .hostname = "", .verify = false},
           .tls_ca_file = site.ca_file().string(),
           .default_port = site.port()},
          [&](const Result& result) { answered += result.outcome == Result::Outcome::answered; });

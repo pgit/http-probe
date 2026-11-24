@@ -27,6 +27,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace http_probe::test
@@ -43,6 +44,7 @@ public:
       std::string body;
       std::string content_type = "text/html";
       std::string location;
+      std::vector<std::pair<std::string, std::string>> fields; ///< more of them, like Alt-Svc
       std::chrono::milliseconds delay{}; ///< how long the server takes to get to it
    };
 

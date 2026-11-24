@@ -9,6 +9,7 @@
 #include <c_ares_async/resolver.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -91,6 +92,42 @@ struct Plan
  */
 Plan plan_routes(std::string_view host, const ServiceRecords& found,
                  const Protocols& protocols = {}, std::uint16_t default_port = 443);
+
+// -------------------------------------------------------------------------------------------------
+
+/// One alternative of an Alt-Svc field (RFC 7838, section 3), without its parameters.
+struct AltService
+{
+   std::string protocol_id; ///< the ALPN protocol, percent-decoded: "h3", "h2", "http/1.1"
+   std::string host; ///< as it came, empty for the origin's own
+   std::uint16_t port = 0;
+
+   std::string to_string() const; ///< as in the field: h3=":443"
+};
+
+/**
+ * The alternatives of an Alt-Svc field, in the order of the server's preference, which is the order
+ * they come in. The values of several fields of that name, joined by commas, are one list. "clear"
+ * has none, and so does an alternative that does not parse, which goes to \p skipped as it came.
+ */
+std::vector<AltService> parse_alt_svc(std::string_view value, std::vector<std::string>& skipped);
+
+/// Which alternative service to ask, if any, see plan_alt_svc().
+struct AltSvcPlan
+{
+   std::optional<Route> route;
+   std::vector<std::string> rejected; ///< the alternatives ahead of it, and why not
+};
+
+/**
+ * The first of \p alternatives that is worth a request to https://\p host/ once a response has
+ * arrived: on the host's own name, as anyhttp can only verify the name it connects to, in a
+ * protocol of \p protocols, and at an endpoint that is none of those \p tried already. An endpoint
+ * is the transport and the port, as HTTP/2 and HTTP/1.1 go over the same TCP connection. The
+ * alternatives after the one that is taken are not looked at.
+ */
+AltSvcPlan plan_alt_svc(std::string_view host, const std::vector<AltService>& alternatives,
+                        const std::vector<Route>& tried, const Protocols& protocols = {});
 
 // =================================================================================================
 

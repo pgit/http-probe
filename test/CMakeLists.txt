@@ -15,13 +15,15 @@ find_package(OpenSSL REQUIRED)
 #
 # The DNS server of c-ares-async's own tests, at the commit of the pin: not an interface of that
 # library, but all it takes to have a zone of our own on loopback. Moving the pin may mean adapting
-# to it. Compiled apart, as the warnings of this project are not for those sources.
+# to it. Compiled apart, as the warnings of this project are not for those sources. With
+# c_ares_async::doq it serves DNS over QUIC as well, and for that it takes a temporary directory
+# from GoogleTest.
 #
 add_library(
     fake_dns STATIC ${c_ares_async_SOURCE_DIR}/test/fake_dns_server.cpp
                     ${c_ares_async_SOURCE_DIR}/test/test_certificate.cpp)
 target_include_directories(fake_dns SYSTEM PUBLIC ${c_ares_async_SOURCE_DIR}/test)
-target_link_libraries(fake_dns PUBLIC c_ares_async::corosio anyhttp::anyhttp OpenSSL::SSL
+target_link_libraries(fake_dns PUBLIC c_ares_async::doq anyhttp::anyhttp GTest::gtest OpenSSL::SSL
                                       OpenSSL::Crypto)
 
 add_library(test_site STATIC site.cpp)
@@ -80,14 +82,27 @@ add_test(NAME http_probe_describes_its_options COMMAND http-probe --help)
 set_tests_properties(http_probe_describes_its_options PROPERTIES
     PASS_REGULAR_EXPRESSION "--dns-server SERVER")
 
+add_test(NAME http_probe_refuses_a_keylog_it_can_not_write
+         COMMAND http-probe --keylog /nonexistent/keylog localhost)
+set_tests_properties(http_probe_refuses_a_keylog_it_can_not_write PROPERTIES
+    PASS_REGULAR_EXPRESSION "can't write the TLS key log '/nonexistent/keylog'")
+
 add_test(NAME http_probe_refuses_dot_without_a_name COMMAND http-probe --dot localhost)
 set_tests_properties(http_probe_refuses_dot_without_a_name PROPERTIES
     PASS_REGULAR_EXPRESSION "--dot needs a name")
 
+add_test(NAME http_probe_refuses_doq_without_a_name COMMAND http-probe --doq localhost)
+set_tests_properties(http_probe_refuses_doq_without_a_name PROPERTIES
+    PASS_REGULAR_EXPRESSION "--doq needs a name")
+
+add_test(NAME http_probe_refuses_dot_and_doq COMMAND http-probe --dot --doq localhost)
+set_tests_properties(http_probe_refuses_dot_and_doq PROPERTIES
+    PASS_REGULAR_EXPRESSION "--dot and --doq don't go together")
+
 add_test(NAME http_probe_refuses_tls_options_without_dot
          COMMAND http-probe --tls-no-verify localhost)
 set_tests_properties(http_probe_refuses_tls_options_without_dot PROPERTIES
-    PASS_REGULAR_EXPRESSION "only apply with --dot")
+    PASS_REGULAR_EXPRESSION "only apply with --dot or --doq")
 
 add_test(NAME http_probe_takes_dns_only
          COMMAND http-probe --dns-only --dns-server 127.0.0.1:1 localhost)
@@ -126,3 +141,13 @@ add_test(NAME http_probe_shows_the_turns_of_the_event_loop_with_vv
          COMMAND http-probe -vv --dns-server 127.0.0.1:1 localhost)
 set_tests_properties(http_probe_shows_the_turns_of_the_event_loop_with_vv PROPERTIES
     PASS_REGULAR_EXPRESSION "--- 0 ---")
+
+add_test(NAME http_probe_refuses_a_path_without_a_slash
+         COMMAND http-probe --path robots.txt localhost)
+set_tests_properties(http_probe_refuses_a_path_without_a_slash PROPERTIES
+    PASS_REGULAR_EXPRESSION "'robots.txt' is not a path to request")
+
+add_test(NAME http_probe_refuses_alt_svc_with_dns_only
+         COMMAND http-probe --alt-svc --dns-only localhost)
+set_tests_properties(http_probe_refuses_alt_svc_with_dns_only PROPERTIES
+    PASS_REGULAR_EXPRESSION "rules out --alt-svc")

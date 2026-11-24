@@ -23,6 +23,11 @@ records. `--all-headers` adds the header fields of the response below that line.
 reported and not followed, and nothing else on the host is requested. Its `Location` goes at the end of the status line, as in `301 … -> https://www.example.com/`,
 as it came: not resolved against the URL, and not looked up. [Here is what that looks like](doc/README.md).
 
+**With `--path`,** that is another path on each host, the same on all of them, instead of `/`, as in
+`--path /robots.txt` or `--path '/search?q=1'`: a path and maybe a query, percent-encoded where it has
+to be, and no fragment. It is still one request, for that and for nothing else. The path of a URL in
+a `--file` list has no say in this, only its host.
+
 There is output for every host but those that do not exist, which `--all` adds. The counts at the end
 look like this, on stderr:
 
@@ -87,8 +92,8 @@ example.com: answered
 ```
 
 All other hosts get the outcome they always get. A host counts as `answered` only if all of its
-addresses did, whatever the status, and otherwise as `failed`. This is the one exception to one request
-per host, and it can't go with `--dns-only`. The addresses are all asked at the same time, so a host
+addresses did, whatever the status, and otherwise as `failed`. This is one of the two exceptions to one
+request per host, along with `--alt-svc`, and it can't go with `--dns-only`. The addresses are all asked at the same time, so a host
 takes as long as its slowest address, and they are printed in the order of trying them all the same.
 `--timeout-ms` then is per address on each route. Beyond
 that, the next paragraph holds for each address, and nothing is followed here either. HTTP/2 and HTTP/3
@@ -96,8 +101,57 @@ have no reason phrase, so there the `OK` is what that status is called. A redire
 at the end of the line, as in `301 Moved Permanently -> /elsewhere`, and `--all-headers` adds the
 header fields of each response below its line.
 
+**With `--alt-svc`,** a response may lead to one request more, for the same path again, at the
+alternative service that its `Alt-Svc` field names ([RFC 7838](https://www.rfc-editor.org/rfc/rfc7838)),
+whatever the status. That is the first of the alternatives, in the order the server put them in,
+that
+
+- is on the host's own name, as in `h3=":443"`, so that no other host is asked or even looked up,
+- has a protocol that anyhttp speaks, `h3`, `h2` or `http/1.1`, and that is one to speak with `--h3`,
+  `--h2` and `--h1`,
+- and is at an endpoint that was not tried yet for the host, whether a request went out there or not.
+  An endpoint is QUIC or TCP, and the port, so that `h2=":443"` after a response over TCP on port 443
+  is the same one, whichever of HTTP/2 and HTTP/1.1 the server chose.
+
+It goes to the address that answered, with a timeout of its own, and that is it: there is no next
+address and no next alternative, and nothing it says is followed either. What came of it has a line
+below the others:
+
+```
+example.com: 200 [h2 example.com:443] at 192.0.2.1, 5 bytes in 20ms
+  record: HTTPS 1 . alpn=h2
+  alternative: [h3 example.com:443] at 192.0.2.1 200 OK
+```
+
+The alternatives ahead of it that could not be used are notes, and so are those that do not parse,
+while `clear` has none. The outcome is that of the first request, so that a host whose alternative
+fails is still `answered`, with the failure on its line. `--all-headers` adds the header fields below
+it. With `--each-address`, each address that answered gets its own alternative, on a line below its
+own, without saying the address again. It can't go with `--dns-only`. The request counts in `--stats`
+like any other.
+
+**With `--stats`,** the numbers of the run follow the counts at the end, on stderr:
+
+```
+lookups:   12 for HTTPS records, 10 for addresses
+requests:  10 sent on 11 connection attempts, 2 timed out
+rate:      4.0 requests/s over 2.5s
+responses: 9: 6 2xx, 2 3xx, 1 5xx, 3 h3, 5 h2, 1 h1
+received:  1.2 MB of bodies, 4.3 kB of headers
+durations: 10ms min, 20ms median, 300ms max
+```
+
+A connection attempt is one per address on each route that got a turn, and a request is one that
+went out, however it ended. The rate is that of the requests over the whole run, lookups included.
+The bytes are those of the responses that came back whole, after decoding: the headers as HTTP/1.1
+text whatever the protocol, with nothing of TLS, QUIC or the framing of HTTP/2 and HTTP/3. The
+durations are those of the responses, from connecting to the end, as on their lines. The last three
+lines are left out without a response.
+
 **One request means one.** The next route is for when connecting failed. Once a request has gone out,
-the host has been asked, so that a timeout or a response cut short ends it there, as a failure.
+the host has been asked, so that a timeout or a response cut short ends it there, as a failure. With
+`--each-address` and `--alt-svc`, that goes for each address and for the alternative service: one
+request per endpoint, and never more.
 
 The address comes from c-ares, so `--dns-server` applies to it, and `/etc/hosts` as well. The address
 hints in a record do not. Addresses are tried one at a time, IPv6 first and otherwise in the order
@@ -111,6 +165,15 @@ the event loop, in red if it took 10 ms or more, to show which turn a log line b
 the same time mix in the log, so `--concurrency 1` helps. Colours are for terminals only unless there
 is `--color`, except that anyhttp puts them into some of its log messages regardless.
 
+**To decrypt a capture,** `--keylog FILE` appends the secrets of every TLS handshake with the hosts to
+FILE, in the NSS key log format that Wireshark reads as its "(Pre)-Master-Secret log filename", and
+`SSLKEYLOGFILE` does the same, as for curl and browsers. The file is created with mode 0600, because
+whoever can read it can read the traffic, and a file that can't be written stops the run before any
+lookup. Only HTTP/3 is logged: anyhttp has no key log for TLS over TCP on the Capy and Corosio
+runtime, as Corosio's TLS stream does not give access to its OpenSSL handles. So a run that speaks
+HTTP/2 or HTTP/1.1 says so on stderr, and `--h3` keeps a run to what is logged. The handshakes with the
+DNS server of `--dot` or `--doq` are not logged either.
+
 **Use `--dns-server`.** The resolver in the devcontainer answers with no data for HTTPS records, even
 where they exist, which looks just like no host having any. It takes addresses and host names, with a
 port behind either. A name is looked up in the clear with the servers of the system, whatever the
@@ -123,6 +186,11 @@ address, or several names, `--tls-hostname` has to give it. `--tls-no-verify` sk
 is for testing and has nothing to do with the certificates of the hosts. A failed handshake makes the
 hosts lookup failures, and says why in the log. `--ca-file` is for the hosts as well: the certificate
 of the DNS server goes by the trust store of OpenSSL, which `SSL_CERT_FILE` can change.
+
+**`--doq` asks over DNS over QUIC** ([RFC 9250](https://www.rfc-editor.org/rfc/rfc9250)) instead, on
+UDP port 853 unless the server says otherwise, with a connection to each server and a stream for each
+query. All of the above holds for it as it does for `--dot`: the name to check the certificate
+against, `--tls-hostname`, `--tls-no-verify` and the trust store. It is one or the other, not both.
 
 **A response goes to memory as a whole,** as anyhttp has no way of getting at it piece by piece with a
 GET yet. So only `--timeout-ms` limits how large one can get.

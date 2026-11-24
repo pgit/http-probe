@@ -2,16 +2,20 @@
 
 #include <anyhttp/session.hpp>
 
-#include <boost/beast/http/field.hpp>
 #include <boost/capy/cond.hpp>
 #include <boost/capy/when_all.hpp>
 #include <boost/corosio/ip_address.hpp>
 #include <boost/corosio/timeout.hpp>
+#include <boost/http/field.hpp>
 #include <boost/url/parse.hpp>
 #include <boost/url/url.hpp>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <exception>
 #include <format>
 #include <iterator>
@@ -19,9 +23,10 @@
 #include <ranges>
 #include <set>
 #include <stdexcept>
+#include <system_error>
 #include <tuple>
 
-namespace http = boost::beast::http;
+namespace http = boost::http;
 
 namespace http_probe
 {
@@ -41,8 +46,8 @@ constexpr int max_alias_chain = 8;
 //
 std::string redirect_location(const anyhttp::client::Message& message)
 {
-   const auto status = message.result_int();
-   return status >= 300 && status < 400 ? std::string(message[http::field::location])
+   const auto status = message.status_int();
+   return status >= 300 && status < 400 ? std::string(message.value_or(http::field::location, ""))
                                         : std::string();
 }
 
@@ -50,7 +55,7 @@ HeaderFields header_fields(const anyhttp::client::Message& message)
 {
    HeaderFields fields;
    for (const auto& field : message)
-      fields.emplace_back(field.name_string(), field.value());
+      fields.emplace_back(field.name, field.value);
    return fields;
 }
 
@@ -130,7 +135,8 @@ c_ares_async::tls_options complete_dns_tls(c_ares_async::tls_options tls, std::s
    if (!tls.enabled)
    {
       if (!tls.hostname.empty() || !tls.verify)
-         throw std::invalid_argument("--tls-hostname and --tls-no-verify only apply with --dot");
+         throw std::invalid_argument(
+            "--tls-hostname and --tls-no-verify only apply with --dot or --doq");
       return tls;
    }
 
@@ -142,16 +148,34 @@ c_ares_async::tls_options complete_dns_tls(c_ares_async::tls_options tls, std::s
       if (const auto named = server_name(server))
          names.insert(named->name);
 
+   const std::string_view option = tls.quic ? "--doq" : "--dot";
    if (names.size() == 1)
       tls.hostname = *names.begin();
    else if (tls.verify)
       throw std::invalid_argument(std::format(
          "{}, or --tls-no-verify to skip the check",
-         names.empty() ? "--dot needs a name to verify the certificate of the DNS "
-                         "server against: a host name as --dns-server, or --tls-hostname"
-                       : "--dns-server names several hosts, so --dot needs "
-                         "--tls-hostname to verify their certificates against"));
+         names.empty() ? std::format("{} needs a name to verify the certificate of the DNS "
+                                     "server against: a host name as --dns-server, or "
+                                     "--tls-hostname",
+                                     option)
+                       : std::format("--dns-server names several hosts, so {} needs "
+                                     "--tls-hostname to verify their certificates against",
+                                     option)));
    return tls;
+}
+
+//
+// anyhttp opens the key log on every connect and fails the connect if it can't, which would be
+// every host of a run for a file in a directory that does not exist. So it is tried once, ahead of
+// them, the way anyhttp opens it.
+//
+void check_keylog_file(const std::string& file)
+{
+   const int fd = ::open(file.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+   if (fd < 0)
+      throw std::invalid_argument(std::format("can't write the TLS key log '{}': {}", file,
+                                              std::system_category().message(errno)));
+   ::close(fd);
 }
 
 // =================================================================================================
@@ -208,6 +232,15 @@ Prober::Prober(const capy::any_executor& executor, Config config, Observer obser
       throw std::invalid_argument("a concurrency of 0 would never get anywhere");
    if (config_.dns_only && config_.each_address)
       throw std::invalid_argument("--dns-only connects to nothing, which rules out --each-address");
+   if (config_.dns_only && config_.alt_svc)
+      throw std::invalid_argument("--dns-only connects to nothing, which rules out --alt-svc");
+   if (!boost::urls::parse_origin_form(config_.path))
+      throw std::invalid_argument(
+         std::format("'{}' is not a path to request: that starts with '/', may have a query, and "
+                     "has no fragment and nothing that is not percent-encoded, like a space",
+                     config_.path));
+   if (!config_.tls_keylog_file.empty() && !config_.dns_only)
+      check_keylog_file(config_.tls_keylog_file);
 
    std::set<std::string> seen;
    for (const auto& host : config_.hosts)
@@ -269,6 +302,7 @@ capy::task<std::string> Prober::dns_server_addresses()
 
 capy::task<> Prober::run()
 {
+   const auto start = std::chrono::steady_clock::now();
    const auto servers = co_await dns_server_addresses();
 
    resolver_ = std::make_unique<c_ares_async::resolver>(executor_, config_.dns_tls);
@@ -285,6 +319,8 @@ capy::task<> Prober::run()
    std::ignore = co_await capy::when_all(std::move(workers));
 
    resolver_.reset();
+   stats_.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
 }
 
 capy::task<capy::results<>> Prober::work()
@@ -316,6 +352,7 @@ capy::task<ServiceRecords> Prober::resolve_service(const std::string& host)
       // GHSA-6wfj-rwm7-3542 is about. c-ares has timeouts of its own.
       //
       config_.logger->debug("{}: asking for the HTTPS records of '{}'", host, found.owner);
+      ++stats_.https_lookups;
       auto [ec, records] = co_await resolver_->resolve_https(found.owner);
       if (ec)
       {
@@ -392,6 +429,7 @@ capy::task<Result> Prober::probe(const std::string& host)
    // host, and no record says that it has to have one.
    //
    config_.logger->debug("{}: asking for the addresses of '{}'", host, host);
+   ++stats_.address_lookups;
    auto [lookup_ec, addresses] = co_await resolver_->resolve(host, "");
    if (lookup_ec || addresses.empty())
    {
@@ -444,8 +482,10 @@ capy::task<Result> Prober::probe(const std::string& host)
    }
 
    result.outcome = Result::Outcome::failed;
+   std::vector<Route> tried; // so that Alt-Svc does not lead back to one of them
    for (const auto& route : plan.routes)
    {
+      tried.push_back(route);
       const auto deadline = std::chrono::steady_clock::now() + config_.timeout;
       for (const auto& address : addresses)
       {
@@ -468,7 +508,7 @@ capy::task<Result> Prober::probe(const std::string& host)
 
          result.outcome = Result::Outcome::answered;
          result.error.clear();
-         result.status = static_cast<int>(response.message.result_int());
+         result.status = static_cast<int>(response.message.status_int());
          result.location = redirect_location(response.message);
          auto spoken = route;
          spoken.protocol = response.protocol;
@@ -476,6 +516,9 @@ capy::task<Result> Prober::probe(const std::string& host)
          result.fields = header_fields(response.message);
          result.body_size = response.message.body().size();
          result.duration = response.duration;
+         if (config_.alt_svc)
+            result.alt_svc =
+               co_await follow_alt_svc(host, result.fields, tried, address, result.notes);
          co_return result;
       }
    }
@@ -495,8 +538,10 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
                                                             std::vector<std::string>& notes)
 {
    AddressReply reply{.address = address.address().to_string()};
+   std::vector<Route> tried;
    for (const auto& route : routes)
    {
+      tried.push_back(route);
       config_.logger->debug("{}: connecting to {} by {}, for {}", host, reply.address,
                             route.to_string(), route.source);
       const auto deadline = std::chrono::steady_clock::now() + config_.timeout;
@@ -504,11 +549,13 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
          co_await attempt(route, host, corosio::endpoint(address, route.port), deadline);
       if (!ec)
       {
-         reply.status = static_cast<int>(response.message.result_int());
+         reply.status = static_cast<int>(response.message.status_int());
          reply.reason = response.message.reason();
          reply.location = redirect_location(response.message);
          reply.fields = header_fields(response.message);
          reply.error.clear();
+         if (config_.alt_svc)
+            reply.alt_svc = co_await follow_alt_svc(host, reply.fields, tried, address, notes);
          co_return {std::error_code(), std::move(reply)};
       }
 
@@ -522,9 +569,69 @@ capy::task<capy::results<AddressReply>> Prober::ask_address(const std::vector<Ro
 }
 
 //
+// The one request more that Alt-Svc may lead to, at the address that answered, on the host's own
+// name and at none of the endpoints tried already. Whether it gets a response or not, that is it:
+// the alternatives after it are for when the client would not have been able to use this one.
+//
+capy::task<std::optional<AltSvcReply>> Prober::follow_alt_svc(const std::string& host,
+                                                              const HeaderFields& fields,
+                                                              const std::vector<Route>& tried,
+                                                              const corosio::endpoint& address,
+                                                              std::vector<std::string>& notes)
+{
+   const auto is_alt_svc = [](std::string_view name) {
+      constexpr std::string_view alt_svc = "alt-svc";
+      return std::ranges::equal(
+         name, alt_svc, [](unsigned char a, unsigned char b) { return std::tolower(a) == b; });
+   };
+
+   std::string value;
+   for (const auto& [name, field_value] : fields)
+      if (is_alt_svc(name))
+         value += (value.empty() ? "" : ", ") + field_value;
+   if (value.empty())
+      co_return std::nullopt;
+
+   std::vector<std::string> skipped;
+   const auto alternatives = parse_alt_svc(value, skipped);
+   for (const auto& element : skipped)
+      notes.push_back(std::format("Alt-Svc '{}': does not parse", element));
+
+   auto plan = plan_alt_svc(host, alternatives, tried, config_.protocols);
+   for (const auto& rejected : plan.rejected)
+      config_.logger->debug("{}: rejected: {}", host, rejected);
+   std::ranges::move(plan.rejected, std::back_inserter(notes));
+   if (!plan.route)
+      co_return std::nullopt;
+
+   const auto& route = *plan.route;
+   AltSvcReply reply{.route = route.to_string(), .address = address.address().to_string()};
+   config_.logger->debug("{}: connecting to {} by {}, for {}", host, reply.address,
+                         route.to_string(), route.source);
+   auto [ec, response] = co_await attempt(route, host, corosio::endpoint(address, route.port),
+                                          std::chrono::steady_clock::now() + config_.timeout);
+   if (ec)
+   {
+      reply.error = response.error;
+      config_.logger->debug("{}: [{}] {} at {}", host, reply.route, reply.error, reply.address);
+      co_return reply;
+   }
+
+   auto spoken = route;
+   spoken.protocol = response.protocol;
+   reply.route = spoken.to_string();
+   reply.status = static_cast<int>(response.message.status_int());
+   reply.reason = response.message.reason();
+   reply.location = redirect_location(response.message);
+   reply.fields = header_fields(response.message);
+   co_return reply;
+}
+
+//
 // Connects as the route says, to this one address so that there is no doubt about which it was, and
-// asks for the host's root, by the deadline. After that it ends the connection in an orderly way,
-// which has limits of its own and is none of the timeout's business: the response is there by then.
+// asks the host for Config::path by the deadline. After that it ends the connection in an orderly
+// way, which has limits of its own and is none of the timeout's business: the response is there by
+// then.
 //
 capy::task<capy::results<Prober::Response>>
 Prober::attempt(const Route& route, const std::string& host, const corosio::endpoint& endpoint,
@@ -533,6 +640,7 @@ Prober::attempt(const Route& route, const std::string& host, const corosio::endp
    anyhttp::client::Config client_config;
    client_config.protocol = route.protocol;
    client_config.tls_ca_file = config_.tls_ca_file;
+   client_config.tls_keylog_file = config_.tls_keylog_file;
 
    //
    // The name of the route is what anyhttp verifies the certificate against, wherever the
@@ -553,12 +661,18 @@ Prober::attempt(const Route& route, const std::string& host, const corosio::endp
    // cancelled to finish.
    //
    auto [ec, response] = co_await corosio::timeout(
-      exchange(client, session, request_sent, boost::urls::url(std::format("https://{}/", host))),
+      exchange(client, session, request_sent,
+               boost::urls::url(std::format("https://{}{}", host, config_.path))),
       deadline);
+
+   ++stats_.attempts;
+   if (request_sent)
+      ++stats_.requests;
 
    response.request_sent = request_sent;
    if (ec == capy::cond::timeout)
    {
+      ++stats_.timeouts;
       response.error = std::format("timed out after {}", config_.timeout);
       co_return {ec, std::move(response)};
    }
@@ -567,10 +681,23 @@ Prober::attempt(const Route& route, const std::string& host, const corosio::endp
       std::chrono::steady_clock::now() - start);
 
    if (!ec)
+   {
+      count_response(response);
       if (auto [shutdown_ec] = co_await session.shutdown(); shutdown_ec)
          config_.logger->debug("{}: shutdown: {}", host, shutdown_ec.message());
+   }
 
    co_return {ec, std::move(response)};
+}
+
+void Prober::count_response(const Response& response)
+{
+   ++stats_.responses;
+   ++stats_.status_classes[static_cast<int>(response.message.status_int()) / 100];
+   ++stats_.protocols[response.protocol];
+   stats_.header_bytes += response.message.buffer().size();
+   stats_.body_bytes += response.message.body().size();
+   stats_.durations.push_back(response.duration);
 }
 
 //

@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <format>
 #include <fstream>
@@ -45,9 +46,10 @@ constexpr std::string_view usage = R"(usage: http-probe [options] HOST...
 )";
 
 constexpr std::string_view about =
-   "Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once, the way "
-   "they say or over TCP on port 443 if they don't, printing the status of the response on one "
-   "line. Redirects are reported and not followed, and nothing else on the host is requested.";
+   "Looks up the HTTPS records of each host (RFC 9460), and requests https://HOST/ once, or the "
+   "path of --path, the way they say or over TCP on port 443 if they don't, printing the status of "
+   "the response on one line. Redirects are reported and not followed, and nothing else on the "
+   "host is requested.";
 
 constexpr std::string_view exit_code =
    "The exit code is 0 if every host that was connected to answered, whatever the status, and "
@@ -60,6 +62,7 @@ struct Arguments
    bool help = false;
    bool all = false;
    bool all_headers = false;
+   bool stats = false;
    bool color = false;
    int verbosity = 0;
 };
@@ -131,6 +134,10 @@ po::options_description describe_options(Arguments& arguments)
         "a host to request, the same as giving HOST by itself");
    opts("file", po::value(&arguments.files)->value_name("LIST"),
         "read the hosts from a file, one per line, as names or as URLs");
+   opts("path", po::value(&config.path)->value_name("PATH")->default_value(config.path),
+        "what to request on each host, the same on all of them: a path, maybe with a query, as in "
+        "/robots.txt or /search?q=1, percent-encoded where it has to be. The path of a URL in "
+        "--file has no say in this");
    opts("dns-server", po::value(&config.dns_server)->value_name("SERVER"),
         "the DNS servers to ask, comma separated, by address or by name, like 192.0.2.1, "
         "192.0.2.1:5353 or dns.example.com; default: the system's, which may well not answer for "
@@ -138,17 +145,26 @@ po::options_description describe_options(Arguments& arguments)
    opts("dot", po::bool_switch(&config.dns_tls.enabled),
         "ask the DNS servers over TLS (RFC 7858), which moves them to port 853 unless they say "
         "otherwise");
+   opts("doq", po::bool_switch(&config.dns_tls.quic),
+        "ask the DNS servers over QUIC (RFC 9250), which moves them to UDP port 853 unless they "
+        "say otherwise. Like --dot, and instead of it");
    opts("tls-hostname", po::value(&config.dns_tls.hostname)->value_name("NAME"),
-        "with --dot, the name to use for SNI and to verify the certificate of the DNS server "
-        "against, like one.one.one.one; default: the host name in --dns-server");
+        "with --dot or --doq, the name to use for SNI and to verify the certificate of the DNS "
+        "server against, like one.one.one.one; default: the host name in --dns-server");
    opts("tls-no-verify", po::value<bool>()->zero_tokens()->notifier([&config](bool) {
       config.dns_tls.verify = false;
    }),
-        "with --dot, accept any certificate from the DNS server (testing only); does not apply to "
-        "the hosts");
+        "with --dot or --doq, accept any certificate from the DNS server (testing only); does not "
+        "apply to the hosts");
    opts("ca-file", po::value(&config.tls_ca_file)->value_name("PEM"),
-        "the CA certificates to verify the hosts with; default: the system's. Not for --dot, which "
-        "goes by the trust store of OpenSSL, as SSL_CERT_FILE can say");
+        "the CA certificates to verify the hosts with; default: the system's. Not for --dot or "
+        "--doq, which go by the trust store of OpenSSL, as SSL_CERT_FILE can say");
+   if (const char* keylog = std::getenv("SSLKEYLOGFILE"))
+      config.tls_keylog_file = keylog;
+   opts("keylog", po::value(&config.tls_keylog_file)->value_name("FILE"),
+        "append the secrets of every TLS handshake with the hosts to FILE, in the key log "
+        "format that Wireshark reads, to decrypt a capture with; default: $SSLKEYLOGFILE, as for "
+        "curl. Only HTTP/3 is logged: TLS over TCP has no key log on this I/O runtime");
    opts("concurrency",
         po::value<int>()
            ->value_name("N")
@@ -178,10 +194,18 @@ po::options_description describe_options(Arguments& arguments)
    opts("each-address", po::bool_switch(&config.each_address),
         "send a request to each address of a host and print the status line of each, instead of "
         "one request per host");
+   opts("alt-svc", po::bool_switch(&config.alt_svc),
+        "after a response, also send a request to the alternative service its Alt-Svc field names "
+        "first, of those on the host's own name, in a protocol to speak and at an endpoint not "
+        "tried yet, at the same address");
    opts("all-headers", po::bool_switch(&arguments.all_headers),
         "also print the header fields of each response, after its status line");
    opts("all", po::bool_switch(&arguments.all),
         "also print the hosts that do not exist, and those that --h3, --h2 or --h1 leave out");
+   opts("stats", po::bool_switch(&arguments.stats),
+        "at the end, also print the numbers of the run to stderr: lookups, connection attempts, "
+        "requests, the rate of them, responses by status and protocol, bytes received and how "
+        "long the responses took");
    opts("color", po::bool_switch(&arguments.color),
         "colour the output even where it does not go to a terminal, e.g. into 'less -R'");
    opts("verbose,v", po::value<std::vector<std::string>>()->zero_tokens()->composing(),
@@ -226,6 +250,14 @@ void parse_arguments(int argc, char** argv, const po::options_description& optio
 
    if (arguments.help)
       return;
+
+   //
+   // To c-ares-async, DNS over QUIC is DNS over TLS on QUIC: TLS is on, and QUIC is how.
+   //
+   auto& dns_tls = arguments.config.dns_tls;
+   if (dns_tls.enabled && dns_tls.quic)
+      throw std::invalid_argument("--dot and --doq don't go together: it's TLS or QUIC");
+   dns_tls.enabled = dns_tls.enabled || dns_tls.quic;
 
    for (const auto& file : arguments.files)
    {
@@ -308,12 +340,20 @@ int main(int argc, char* argv[])
          return 0;
       }
 
-      auto& [config, files, help, all, all_headers, color, verbosity] = arguments;
+      auto& [config, files, help, all, all_headers, stats, color, verbosity] = arguments;
       config.logger = set_up_logging(verbosity, color);
 
       const bool own_dns_server = !config.dns_server.empty();
       const bool color_results = color || isatty(STDOUT_FILENO);
       const bool color_log = color || isatty(STDERR_FILENO);
+
+      // anyhttp says so as a warning on each connect, which is not shown without -vv.
+      const auto keylog_note =
+         !config.tls_keylog_file.empty() && !config.dns_only && config.protocols.speaks_tcp()
+            ? std::format("http-probe: only HTTP/3 goes into the TLS key log '{}', TLS over TCP "
+                          "has none on this I/O runtime",
+                          config.tls_keylog_file)
+            : std::string();
 
       const auto report = [&](const http_probe::Result& result) {
          ++counts[result.outcome];
@@ -329,6 +369,8 @@ int main(int argc, char* argv[])
 
       boost::corosio::io_context context;
       http_probe::Prober prober(context.get_executor(), std::move(config), report);
+      if (!keylog_note.empty())
+         std::println(stderr, "{}", keylog_note);
       std::exception_ptr failed;
 
       //
@@ -348,6 +390,8 @@ int main(int argc, char* argv[])
          std::rethrow_exception(failed);
 
       std::println(stderr, "{}", http_probe::format_summary(counts, color_log));
+      if (stats)
+         std::print(stderr, "{}", http_probe::format_stats(prober.stats()));
       if (with_records == 0 && !own_dns_server)
          std::println(stderr, "http-probe: none of the hosts has an HTTPS record. Not every "
                               "resolver answers for them, so try --dns-server.");

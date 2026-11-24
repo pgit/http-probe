@@ -1,8 +1,11 @@
 #include "output.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <format>
 #include <ranges>
 #include <string_view>
+#include <vector>
 
 namespace http_probe
 {
@@ -65,6 +68,21 @@ std::string reply_text(const AddressReply& reply, bool color)
 }
 
 //
+// What came of following Alt-Svc: the route and the status line, or what went wrong, and where.
+// \p address is for when it can not go without saying.
+//
+std::string alt_svc_text(const AltSvcReply& reply, bool address, bool color)
+{
+   const auto at = address ? std::format(" at {}", address_text(reply.address, color)) : "";
+   if (!reply.error.empty())
+      return std::format("[{}]{} {}: {}", reply.route, at, colored("failed", color_of::bad, color),
+                         reply.error);
+   return std::format("[{}]{} {}{}{}", reply.route, at, status_text(reply.status, color),
+                      reply.reason.empty() ? "" : std::format(" {}", reply.reason),
+                      location_text(reply.location));
+}
+
+//
 // The value of an address hint: the addresses have a colour, the commas between them do not.
 //
 std::string address_list_text(std::string_view list, bool color)
@@ -112,6 +130,35 @@ std::string fields_text(const HeaderFields& fields, std::string_view indent, boo
    for (const auto& [name, value] : fields)
       text += std::format("{}{}: {}\n", indent, colored(name, color_of::field, color), value);
    return text;
+}
+
+//
+// A number of bytes in decimal units, as in "1.2 MB", with three digits at the most before the
+// point.
+//
+std::string bytes_text(std::size_t bytes)
+{
+   if (bytes < 1000)
+      return std::format("{} B", bytes);
+
+   auto value = static_cast<double>(bytes) / 1000;
+   for (const auto* unit : {"kB", "MB", "GB"})
+   {
+      if (value < 999.95)
+         return std::format("{:.1f} {}", value, unit);
+      value /= 1000;
+   }
+   return std::format("{:.1f} TB", value);
+}
+
+//
+// How long a run took: in milliseconds below a second, so that a short one does not come to 0.0s.
+//
+std::string elapsed_text(std::chrono::milliseconds elapsed)
+{
+   return elapsed < std::chrono::seconds(1)
+             ? std::format("{}", elapsed)
+             : std::format("{:.1f}s", std::chrono::duration<double>(elapsed).count());
 }
 
 // =================================================================================================
@@ -171,11 +218,23 @@ std::string format_result(const Result& result, const Style& style)
                           reply_text(reply, color));
       if (style.all_headers)
          text += fields_text(reply.fields, "    ", color);
+      if (reply.alt_svc)
+      {
+         text += std::format("    alternative: {}\n", alt_svc_text(*reply.alt_svc, false, color));
+         if (style.all_headers)
+            text += fields_text(reply.alt_svc->fields, "      ", color);
+      }
    }
    for (const auto& note : result.notes)
       text += colored(std::format("  note: {}", note), color_of::note, color) + "\n";
    if (style.all_headers)
       text += fields_text(result.fields, "  ", color);
+   if (result.alt_svc)
+   {
+      text += std::format("  alternative: {}\n", alt_svc_text(*result.alt_svc, true, color));
+      if (style.all_headers)
+         text += fields_text(result.alt_svc->fields, "    ", color);
+   }
    return text;
 }
 
@@ -196,6 +255,48 @@ std::string format_summary(Counts counts, bool color)
       counts[Outcome::resolved]
          ? std::format(", {}", count(Outcome::resolved, "resolved", color_of::good))
          : "");
+}
+
+std::string format_stats(const Stats& stats)
+{
+   using namespace std::chrono;
+
+   const auto seconds = duration<double>(stats.elapsed).count();
+   auto text = std::format(
+      "lookups:   {} for HTTPS records, {} for addresses\n"
+      "requests:  {} sent on {} connection attempts, {} timed out\n"
+      "rate:      {}\n",
+      stats.https_lookups, stats.address_lookups, stats.requests, stats.attempts, stats.timeouts,
+      seconds > 0 ? std::format("{:.1f} requests/s over {}", stats.requests / seconds,
+                                elapsed_text(stats.elapsed))
+                  : std::format("{} requests in no time", stats.requests));
+   if (stats.responses == 0)
+      return text + "responses: 0\n";
+
+   std::string kinds;
+   for (const auto& [kind, count] : stats.status_classes)
+      kinds += std::format("{}{} {}xx", kinds.empty() ? "" : ", ", count, kind);
+   std::string protocols;
+   for (const auto& [protocol, count] : stats.protocols | std::views::reverse) // h3 first
+      protocols += std::format(", {} {}", count, protocol_name(protocol));
+   text += std::format("responses: {}: {}{}\n", stats.responses, kinds, protocols);
+
+   text += std::format("received:  {} of bodies, {} of headers\n", bytes_text(stats.body_bytes),
+                       bytes_text(stats.header_bytes));
+
+   //
+   // The lower one of the two in the middle, for an even number, so that it is one that was seen.
+   //
+   if (!stats.durations.empty())
+   {
+      auto durations = stats.durations;
+      const auto middle =
+         durations.begin() + static_cast<std::ptrdiff_t>((durations.size() - 1) / 2);
+      std::ranges::nth_element(durations, middle);
+      text += std::format("durations: {} min, {} median, {} max\n", std::ranges::min(durations),
+                          *middle, std::ranges::max(durations));
+   }
+   return text;
 }
 
 // =================================================================================================

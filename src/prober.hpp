@@ -1,5 +1,6 @@
 //
-// One request to https://<host>/ for each host, in the way that the HTTPS records of the host say.
+// One request to https://<host>/ for each host, or to another path on it, in the way that the HTTPS
+// records of the host say.
 //
 #pragma once
 
@@ -21,7 +22,9 @@
 #include <cstdint>
 #include <functional>
 #include <istream>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -40,6 +43,11 @@ struct Config
    /// The host names to request, exactly as given: these are the only names that are connected to.
    std::vector<std::string> hosts;
 
+   /// What to ask each host for, in origin form (RFC 9112, section 3.2.1): a path, which starts
+   /// with '/', and maybe a query, as in "/robots.txt" or "/search?q=1", percent-encoded where it
+   /// has to be. The request to an alternative service asks for the same.
+   std::string path = "/";
+
    /// How many hosts to work on at the same time.
    std::size_t concurrency = 16;
 
@@ -51,9 +59,10 @@ struct Config
    /// with or without a port. Empty for those of the system.
    std::string dns_server;
 
-   /// Whether to ask them over TLS (RFC 7858), and what to check their certificates against, in the
-   /// trust store of the TLS library, which tls_ca_file has no say in. A single host name in
-   /// dns_server goes without saying, as far as the name in here goes.
+   /// Whether to ask them over TLS (RFC 7858) or, with quic as well, over QUIC (RFC 9250), and what
+   /// to check their certificates against, in the trust store of the TLS library, which tls_ca_file
+   /// has no say in. A single host name in dns_server goes without saying, as far as the name in
+   /// here goes.
    c_ares_async::tls_options dns_tls;
 
    /// Who to look up the host names in dns_server with, always in the clear. Empty for the servers
@@ -62,6 +71,12 @@ struct Config
 
    /// The CA certificates to verify servers against, as a PEM file. Empty for the system's.
    std::string tls_ca_file;
+
+   /// Where to append the secrets of every TLS handshake, in the NSS key log format that Wireshark
+   /// reads (what SSLKEYLOGFILE names for curl and browsers), so that a capture can be decrypted.
+   /// Empty for none. anyhttp writes it, and on the Corosio runtime for HTTP/3 only: its TLS over
+   /// TCP has no key log. Whoever can read the file can read the traffic, so it is created 0600.
+   std::string tls_keylog_file;
 
    /// Where to go for HTTPS when the records don't say. Only tests have a use for anything else.
    std::uint16_t default_port = 443;
@@ -79,6 +94,12 @@ struct Config
    /// first that can be connected to. Config::timeout then is per address on each route. See
    /// Result::replies.
    bool each_address = false;
+
+   /// After a response, send one more request to the alternative service that its Alt-Svc field
+   /// names first, of those that plan_alt_svc() takes, at the address that answered. That is one
+   /// request more at the most, per address with Config::each_address, and never to another host.
+   /// See Result::alt_svc and AddressReply::alt_svc.
+   bool alt_svc = false;
 
    /// Where the messages of this program and of c-ares go. anyhttp can't be told: it always uses
    /// the default logger of spdlog, so a logger other than that one can have a level of its own.
@@ -102,6 +123,18 @@ void prefer_ipv6(std::vector<corosio::endpoint>& addresses);
 /// The header fields of a response, in the order they came.
 using HeaderFields = std::vector<std::pair<std::string, std::string>>;
 
+/// What came of the request to an alternative service, see Config::alt_svc.
+struct AltSvcReply
+{
+   std::string route; ///< what the response came over, as the server chose it, or what was tried
+   std::string address;
+   int status = 0; ///< without \c error
+   std::string reason; ///< without \c error, see AddressReply::reason
+   std::string location; ///< with a 3xx status, see Result::location
+   HeaderFields fields; ///< without \c error
+   std::string error; ///< what went wrong, if no response could be had
+};
+
 /// What came of the request to one address of a host, see Config::each_address.
 struct AddressReply
 {
@@ -111,6 +144,7 @@ struct AddressReply
    std::string location; ///< with a 3xx status: the Location field as it came, see Result::location
    HeaderFields fields; ///< without \c error
    std::string error; ///< what went wrong on the last route, if no response could be had
+   std::optional<AltSvcReply> alt_svc; ///< with Config::alt_svc, if the response named one to ask
 };
 
 /// What came of one host.
@@ -146,7 +180,42 @@ struct Result
    std::vector<std::string> addresses; ///< with \c resolved: all of them, in the order of trying
    std::string error; ///< with \c failed: what went wrong on the last route
    std::vector<AddressReply> replies; ///< with Config::each_address, instead of the above
+   /// With Config::alt_svc and \c answered, but not Config::each_address, if the response named an
+   /// alternative service to ask. Whatever came of it, the outcome is that of the first request.
+   std::optional<AltSvcReply> alt_svc;
    std::vector<std::string> notes; ///< records that could not be used, routes that did not work
+};
+
+/// What a run came to as a whole, counted as it goes. Everything happens on one executor, so these
+/// are plain numbers.
+struct Stats
+{
+   std::size_t https_lookups = 0; ///< queries for HTTPS records, those for alias targets included
+   std::size_t address_lookups = 0; ///< queries for the addresses of a host
+
+   /// Connections tried, one per address on each route that got a turn, whether a request went out
+   /// on it or not.
+   std::size_t attempts = 0;
+   std::size_t requests = 0; ///< requests that went out, however they ended
+   std::size_t responses = 0; ///< responses that came back whole
+   std::size_t timeouts = 0; ///< attempts that ran out of time, before or after the request
+
+   /// The responses by the first digit of their status, 2 for 2xx, and by the protocol the server
+   /// chose to speak.
+   std::map<int, std::size_t> status_classes;
+   std::map<anyhttp::Protocol, std::size_t> protocols;
+
+   /// What the responses came to, after decoding: the header as Boost.HTTP puts it into text, which
+   /// is HTTP/1.1 whatever the protocol, and the body. TLS, QUIC and the framing of HTTP/2 and
+   /// HTTP/3 are not in this, and neither is what came of a request that did not end in a response.
+   std::size_t header_bytes = 0;
+   std::size_t body_bytes = 0;
+
+   /// How long each response took, from connecting to its end, as in Result::duration.
+   std::vector<std::chrono::milliseconds> durations;
+
+   /// From the start of run() to its end, including any lookups of the DNS servers.
+   std::chrono::milliseconds elapsed{};
 };
 
 /**
@@ -158,7 +227,9 @@ struct Result
  * about: once a request has gone out, that was it for this host, however it ended. With
  * Config::dns_only, it is the lookups and nothing else. With Config::each_address, all of this goes
  * for each address of the host instead of for the host: one request per address, to all of them at
- * the same time, with the replies in the order of the addresses.
+ * the same time, with the replies in the order of the addresses. With Config::alt_svc, a response
+ * may lead to one request more, to an alternative service at the same address, see
+ * plan_alt_svc().
  *
  * Hosts are worked on Config::concurrency at a time, so results arrive as they are ready. All of
  * this is on the one executor, which is also what calls the observer.
@@ -174,6 +245,9 @@ public:
    Prober(const capy::any_executor& executor, Config config, Observer observer);
 
    capy::task<> run();
+
+   /// What has been counted so far, all of the run once run() is done.
+   const Stats& stats() const { return stats_; }
 
 private:
    struct Response
@@ -193,18 +267,25 @@ private:
                                                        const std::string& host,
                                                        const corosio::endpoint& address,
                                                        std::vector<std::string>& notes);
+   capy::task<std::optional<AltSvcReply>> follow_alt_svc(const std::string& host,
+                                                         const HeaderFields& fields,
+                                                         const std::vector<Route>& tried,
+                                                         const corosio::endpoint& address,
+                                                         std::vector<std::string>& notes);
    capy::task<capy::results<Response>> attempt(const Route& route, const std::string& host,
                                                const corosio::endpoint& endpoint,
                                                std::chrono::steady_clock::time_point deadline);
    capy::task<capy::results<Response>> exchange(anyhttp::client::Client& client,
                                                 anyhttp::Session& session, bool& request_sent,
                                                 boost::urls::url url);
+   void count_response(const Response& response);
 
    capy::any_executor executor_;
    Config config_;
    Observer observer_;
    std::vector<std::string> hosts_;
    std::size_t next_host_ = 0;
+   Stats stats_;
 
    /// For the duration of run(), as a connection for DNS over TLS stays open for as long as this is
    /// around, and with that the event loop busy. By pointer, as there is no std::optional of it.

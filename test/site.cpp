@@ -1,11 +1,10 @@
 #include "site.hpp"
 
-#include <boost/asio/buffer.hpp>
-#include <boost/beast/http/field.hpp>
 #include <boost/capy/buffers/make_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/ex/this_coro.hpp>
 #include <boost/corosio/delay.hpp>
+#include <boost/http/field.hpp>
 #include <boost/system/system_error.hpp>
 
 #include "routes.hpp"
@@ -20,7 +19,7 @@
 
 namespace capy = boost::capy;
 namespace corosio = boost::corosio;
-namespace http = boost::beast::http;
+namespace http = boost::http;
 
 namespace http_probe::test
 {
@@ -50,7 +49,7 @@ Site::Site(const capy::any_executor& executor) : requests_(std::make_shared<std:
          requests->push_back(Request{
             .target = std::string(request.url().encoded_target()),
             .authority = std::string(request.url().encoded_host_and_port()),
-            .user_agent = std::string(request.fields()[http::field::user_agent]),
+            .user_agent = std::string(request.fields().value_or(http::field::user_agent, "")),
             .time = std::chrono::steady_clock::now(),
          });
 
@@ -69,10 +68,12 @@ Site::Site(const capy::any_executor& executor) : requests_(std::make_shared<std:
          fields.set(http::field::content_type, page.content_type);
          if (!page.location.empty())
             fields.set(http::field::location, page.location);
+         for (const auto& [name, value] : page.fields)
+            fields.append(name, value);
 
          if (auto [ec] = co_await response.submit(page.status, std::move(fields)); ec)
             co_return;
-         co_await response.write_eof(boost::asio::buffer(page.body)); // has no overload for Capy's
+         co_await response.write_eof(capy::make_buffer(page.body));
       });
 }
 
