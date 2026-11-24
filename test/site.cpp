@@ -1,6 +1,5 @@
 #include "site.hpp"
 
-#include <boost/asio/buffer.hpp>
 #include <boost/capy/buffers/make_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/ex/this_coro.hpp>
@@ -74,7 +73,7 @@ Site::Site(const capy::any_executor& executor) : requests_(std::make_shared<std:
 
          if (auto [ec] = co_await response.submit(page.status, std::move(fields)); ec)
             co_return;
-         co_await response.write_eof(boost::asio::buffer(page.body)); // has no overload for Capy's
+         co_await response.write_eof(capy::make_buffer(page.body));
       });
 }
 
