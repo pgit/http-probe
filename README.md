@@ -178,6 +178,11 @@ is for testing and has nothing to do with the certificates of the hosts. A faile
 hosts lookup failures, and says why in the log. `--ca-file` is for the hosts as well: the certificate
 of the DNS server goes by the trust store of OpenSSL, which `SSL_CERT_FILE` can change.
 
+**`--doq` asks over DNS over QUIC** ([RFC 9250](https://www.rfc-editor.org/rfc/rfc9250)) instead, on
+UDP port 853 unless the server says otherwise, with a connection to each server and a stream for each
+query. All of the above holds for it as it does for `--dot`: the name to check the certificate
+against, `--tls-hostname`, `--tls-no-verify` and the trust store. It is one or the other, not both.
+
 **A response goes to memory as a whole,** as anyhttp has no way of getting at it piece by piece with a
 GET yet. So only `--timeout-ms` limits how large one can get.
 

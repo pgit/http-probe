@@ -144,17 +144,20 @@ po::options_description describe_options(Arguments& arguments)
    opts("dot", po::bool_switch(&config.dns_tls.enabled),
         "ask the DNS servers over TLS (RFC 7858), which moves them to port 853 unless they say "
         "otherwise");
+   opts("doq", po::bool_switch(&config.dns_tls.quic),
+        "ask the DNS servers over QUIC (RFC 9250), which moves them to UDP port 853 unless they "
+        "say otherwise. Like --dot, and instead of it");
    opts("tls-hostname", po::value(&config.dns_tls.hostname)->value_name("NAME"),
-        "with --dot, the name to use for SNI and to verify the certificate of the DNS server "
-        "against, like one.one.one.one; default: the host name in --dns-server");
+        "with --dot or --doq, the name to use for SNI and to verify the certificate of the DNS "
+        "server against, like one.one.one.one; default: the host name in --dns-server");
    opts("tls-no-verify", po::value<bool>()->zero_tokens()->notifier([&config](bool) {
       config.dns_tls.verify = false;
    }),
-        "with --dot, accept any certificate from the DNS server (testing only); does not apply to "
-        "the hosts");
+        "with --dot or --doq, accept any certificate from the DNS server (testing only); does not "
+        "apply to the hosts");
    opts("ca-file", po::value(&config.tls_ca_file)->value_name("PEM"),
-        "the CA certificates to verify the hosts with; default: the system's. Not for --dot, which "
-        "goes by the trust store of OpenSSL, as SSL_CERT_FILE can say");
+        "the CA certificates to verify the hosts with; default: the system's. Not for --dot or "
+        "--doq, which go by the trust store of OpenSSL, as SSL_CERT_FILE can say");
    opts("concurrency",
         po::value<int>()
            ->value_name("N")
@@ -240,6 +243,14 @@ void parse_arguments(int argc, char** argv, const po::options_description& optio
 
    if (arguments.help)
       return;
+
+   //
+   // To c-ares-async, DNS over QUIC is DNS over TLS on QUIC: TLS is on, and QUIC is how.
+   //
+   auto& dns_tls = arguments.config.dns_tls;
+   if (dns_tls.enabled && dns_tls.quic)
+      throw std::invalid_argument("--dot and --doq don't go together: it's TLS or QUIC");
+   dns_tls.enabled = dns_tls.enabled || dns_tls.quic;
 
    for (const auto& file : arguments.files)
    {

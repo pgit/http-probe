@@ -28,8 +28,8 @@ endif()
 # I/O runtime: Capy and Corosio, and only those. The libraries take either, which is their business:
 # this is a program, and it gets to decide. These shadow the cache entries of the libraries, which
 # go on saying ASIO in CMakeCache.txt. c-ares-async is headers, and its runtime is the target a
-# program links, c_ares_async::corosio here; its option only has it look for Corosio rather than
-# insist on Asio.
+# program links, c_ares_async::corosio here, by way of c_ares_async::doq below; its option only has
+# it look for Corosio rather than insist on Asio.
 #
 set(ANYHTTP_API COROSIO)
 set(C_ARES_ASYNC_API ${ANYHTTP_API})
@@ -40,6 +40,15 @@ set(C_ARES_ASYNC_API ${ANYHTTP_API})
 #
 set(TLS_LIBRARY OpenSSL)
 set(C_ARES_ASYNC_TLS ${TLS_LIBRARY})
+
+#
+# DNS over QUIC, for --doq. c-ares-async does it with anyhttp's QUIC, and takes the anyhttp that is
+# there already when it is configured: the one above, on the same runtime and TLS library. The
+# target for it is c_ares_async::doq, which is c_ares_async::corosio with anyhttp and a macro that
+# changes the resolver's constructor, so every translation unit that makes a resolver has to have
+# it, the DNS server of the tests included.
+#
+set(C_ARES_ASYNC_DOQ ON)
 
 # --------------------------------------------------------------------------------------------------
 
@@ -88,7 +97,7 @@ set(http_probe_warnings -Wall -Wextra -Werror -Wno-missing-designated-field-init
 
 add_library(http_probe_core STATIC src/output.cpp src/prober.cpp src/routes.cpp)
 target_include_directories(http_probe_core PUBLIC src)
-target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::corosio)
+target_link_libraries(http_probe_core PUBLIC anyhttp::anyhttp c_ares_async::doq)
 target_compile_options(http_probe_core PRIVATE ${http_probe_warnings})
 
 add_executable(http-probe src/main.cpp)

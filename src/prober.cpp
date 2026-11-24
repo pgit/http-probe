@@ -130,7 +130,8 @@ c_ares_async::tls_options complete_dns_tls(c_ares_async::tls_options tls, std::s
    if (!tls.enabled)
    {
       if (!tls.hostname.empty() || !tls.verify)
-         throw std::invalid_argument("--tls-hostname and --tls-no-verify only apply with --dot");
+         throw std::invalid_argument(
+            "--tls-hostname and --tls-no-verify only apply with --dot or --doq");
       return tls;
    }
 
@@ -142,15 +143,19 @@ c_ares_async::tls_options complete_dns_tls(c_ares_async::tls_options tls, std::s
       if (const auto named = server_name(server))
          names.insert(named->name);
 
+   const std::string_view option = tls.quic ? "--doq" : "--dot";
    if (names.size() == 1)
       tls.hostname = *names.begin();
    else if (tls.verify)
       throw std::invalid_argument(std::format(
          "{}, or --tls-no-verify to skip the check",
-         names.empty() ? "--dot needs a name to verify the certificate of the DNS "
-                         "server against: a host name as --dns-server, or --tls-hostname"
-                       : "--dns-server names several hosts, so --dot needs "
-                         "--tls-hostname to verify their certificates against"));
+         names.empty() ? std::format("{} needs a name to verify the certificate of the DNS "
+                                     "server against: a host name as --dns-server, or "
+                                     "--tls-hostname",
+                                     option)
+                       : std::format("--dns-server names several hosts, so {} needs "
+                                     "--tls-hostname to verify their certificates against",
+                                     option)));
    return tls;
 }
 

@@ -59,9 +59,10 @@ struct Config
    /// with or without a port. Empty for those of the system.
    std::string dns_server;
 
-   /// Whether to ask them over TLS (RFC 7858), and what to check their certificates against, in the
-   /// trust store of the TLS library, which tls_ca_file has no say in. A single host name in
-   /// dns_server goes without saying, as far as the name in here goes.
+   /// Whether to ask them over TLS (RFC 7858) or, with quic as well, over QUIC (RFC 9250), and what
+   /// to check their certificates against, in the trust store of the TLS library, which tls_ca_file
+   /// has no say in. A single host name in dns_server goes without saying, as far as the name in
+   /// here goes.
    c_ares_async::tls_options dns_tls;
 
    /// Who to look up the host names in dns_server with, always in the clear. Empty for the servers
