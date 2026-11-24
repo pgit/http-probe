@@ -54,14 +54,13 @@ FetchContent_Declare(anyhttp
     SYSTEM)
 FetchContent_Declare(c_ares_async
     GIT_REPOSITORY https://github.com/pgit/c-ares-async.git
-    GIT_TAG 2bbeb48fcd7ca539fc1c6f3fc580984cde7ada4b
+    GIT_TAG d2452c7624e24de6b9062c0a4481ae75d928490b
     SYSTEM)
 
 #
 # Both libraries pin these as well. The first declaration wins, so these are the ones both of them
 # get, and here they are SYSTEM, too. They are anyhttp's pins, which Boost.HTTP in anyhttp has to
-# build against. c-ares-async still pins an older pair, bdadc6a and fd8e95a, and builds against
-# these all the same.
+# build against, and c-ares-async pins the same pair.
 #
 FetchContent_Declare(capy
     GIT_REPOSITORY https://github.com/cppalliance/capy.git
