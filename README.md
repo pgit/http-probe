@@ -165,6 +165,15 @@ the event loop, in red if it took 10 ms or more, to show which turn a log line b
 the same time mix in the log, so `--concurrency 1` helps. Colours are for terminals only unless there
 is `--color`, except that anyhttp puts them into some of its log messages regardless.
 
+**To decrypt a capture,** `--keylog FILE` appends the secrets of every TLS handshake with the hosts to
+FILE, in the NSS key log format that Wireshark reads as its "(Pre)-Master-Secret log filename", and
+`SSLKEYLOGFILE` does the same, as for curl and browsers. The file is created with mode 0600, because
+whoever can read it can read the traffic, and a file that can't be written stops the run before any
+lookup. Only HTTP/3 is logged: anyhttp has no key log for TLS over TCP on the Capy and Corosio
+runtime, as Corosio's TLS stream does not give access to its OpenSSL handles. So a run that speaks
+HTTP/2 or HTTP/1.1 says so on stderr, and `--h3` keeps a run to what is logged. The handshakes with the
+DNS server of `--dot` or `--doq` are not logged either.
+
 **Use `--dns-server`.** The resolver in the devcontainer answers with no data for HTTPS records, even
 where they exist, which looks just like no host having any. It takes addresses and host names, with a
 port behind either. A name is looked up in the clear with the servers of the system, whatever the

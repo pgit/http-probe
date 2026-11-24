@@ -82,6 +82,11 @@ add_test(NAME http_probe_describes_its_options COMMAND http-probe --help)
 set_tests_properties(http_probe_describes_its_options PROPERTIES
     PASS_REGULAR_EXPRESSION "--dns-server SERVER")
 
+add_test(NAME http_probe_refuses_a_keylog_it_can_not_write
+         COMMAND http-probe --keylog /nonexistent/keylog localhost)
+set_tests_properties(http_probe_refuses_a_keylog_it_can_not_write PROPERTIES
+    PASS_REGULAR_EXPRESSION "can't write the TLS key log '/nonexistent/keylog'")
+
 add_test(NAME http_probe_refuses_dot_without_a_name COMMAND http-probe --dot localhost)
 set_tests_properties(http_probe_refuses_dot_without_a_name PROPERTIES
     PASS_REGULAR_EXPRESSION "--dot needs a name")

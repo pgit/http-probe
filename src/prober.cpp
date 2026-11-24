@@ -10,8 +10,12 @@
 #include <boost/url/parse.hpp>
 #include <boost/url/url.hpp>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <exception>
 #include <format>
 #include <iterator>
@@ -19,6 +23,7 @@
 #include <ranges>
 #include <set>
 #include <stdexcept>
+#include <system_error>
 #include <tuple>
 
 namespace http = boost::http;
@@ -159,6 +164,20 @@ c_ares_async::tls_options complete_dns_tls(c_ares_async::tls_options tls, std::s
    return tls;
 }
 
+//
+// anyhttp opens the key log on every connect and fails the connect if it can't, which would be
+// every host of a run for a file in a directory that does not exist. So it is tried once, ahead of
+// them, the way anyhttp opens it.
+//
+void check_keylog_file(const std::string& file)
+{
+   const int fd = ::open(file.c_str(), O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+   if (fd < 0)
+      throw std::invalid_argument(std::format("can't write the TLS key log '{}': {}", file,
+                                              std::system_category().message(errno)));
+   ::close(fd);
+}
+
 // =================================================================================================
 
 } // namespace
@@ -220,6 +239,8 @@ Prober::Prober(const capy::any_executor& executor, Config config, Observer obser
          std::format("'{}' is not a path to request: that starts with '/', may have a query, and "
                      "has no fragment and nothing that is not percent-encoded, like a space",
                      config_.path));
+   if (!config_.tls_keylog_file.empty() && !config_.dns_only)
+      check_keylog_file(config_.tls_keylog_file);
 
    std::set<std::string> seen;
    for (const auto& host : config_.hosts)
@@ -619,6 +640,7 @@ Prober::attempt(const Route& route, const std::string& host, const corosio::endp
    anyhttp::client::Config client_config;
    client_config.protocol = route.protocol;
    client_config.tls_ca_file = config_.tls_ca_file;
+   client_config.tls_keylog_file = config_.tls_keylog_file;
 
    //
    // The name of the route is what anyhttp verifies the certificate against, wherever the

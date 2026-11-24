@@ -72,6 +72,12 @@ struct Config
    /// The CA certificates to verify servers against, as a PEM file. Empty for the system's.
    std::string tls_ca_file;
 
+   /// Where to append the secrets of every TLS handshake, in the NSS key log format that Wireshark
+   /// reads (what SSLKEYLOGFILE names for curl and browsers), so that a capture can be decrypted.
+   /// Empty for none. anyhttp writes it, and on the Corosio runtime for HTTP/3 only: its TLS over
+   /// TCP has no key log. Whoever can read the file can read the traffic, so it is created 0600.
+   std::string tls_keylog_file;
+
    /// Where to go for HTTPS when the records don't say. Only tests have a use for anything else.
    std::uint16_t default_port = 443;
 

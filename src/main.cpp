@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <format>
 #include <fstream>
@@ -158,6 +159,12 @@ po::options_description describe_options(Arguments& arguments)
    opts("ca-file", po::value(&config.tls_ca_file)->value_name("PEM"),
         "the CA certificates to verify the hosts with; default: the system's. Not for --dot or "
         "--doq, which go by the trust store of OpenSSL, as SSL_CERT_FILE can say");
+   if (const char* keylog = std::getenv("SSLKEYLOGFILE"))
+      config.tls_keylog_file = keylog;
+   opts("keylog", po::value(&config.tls_keylog_file)->value_name("FILE"),
+        "append the secrets of every TLS handshake with the hosts to FILE, in the key log "
+        "format that Wireshark reads, to decrypt a capture with; default: $SSLKEYLOGFILE, as for "
+        "curl. Only HTTP/3 is logged: TLS over TCP has no key log on this I/O runtime");
    opts("concurrency",
         po::value<int>()
            ->value_name("N")
@@ -340,6 +347,14 @@ int main(int argc, char* argv[])
       const bool color_results = color || isatty(STDOUT_FILENO);
       const bool color_log = color || isatty(STDERR_FILENO);
 
+      // anyhttp says so as a warning on each connect, which is not shown without -vv.
+      const auto keylog_note =
+         !config.tls_keylog_file.empty() && !config.dns_only && config.protocols.speaks_tcp()
+            ? std::format("http-probe: only HTTP/3 goes into the TLS key log '{}', TLS over TCP "
+                          "has none on this I/O runtime",
+                          config.tls_keylog_file)
+            : std::string();
+
       const auto report = [&](const http_probe::Result& result) {
          ++counts[result.outcome];
          if (!result.records.empty() || result.aliased)
@@ -354,6 +369,8 @@ int main(int argc, char* argv[])
 
       boost::corosio::io_context context;
       http_probe::Prober prober(context.get_executor(), std::move(config), report);
+      if (!keylog_note.empty())
+         std::println(stderr, "{}", keylog_note);
       std::exception_ptr failed;
 
       //

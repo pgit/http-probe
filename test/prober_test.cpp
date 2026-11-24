@@ -940,6 +940,129 @@ TEST_F(Probe, KeepsAnyhttpOutOfALoggerOfItsOwn)
    EXPECT_THAT(library_log.str(), Not(HasSubstr("asking for the HTTPS records")));
 }
 
+namespace
+{
+
+//
+// The TLS key log, in a file of its own for each test. Only the client writes to it: the site's
+// server has none.
+//
+class KeyLog : public Probe
+{
+protected:
+   void TearDown() override { std::filesystem::remove(file); }
+
+   Config config_with_keylog(std::vector<fake_dns_server::svc_param> params)
+   {
+      site.dns().add_https("localhost", 1, ".", std::move(params));
+      site.page("/", {.body = "hello"});
+      auto configuration = config();
+      configuration.tls_keylog_file = file.string();
+      return configuration;
+   }
+
+   /// The lines of the key log, each split into its label, client random and secret.
+   std::vector<std::vector<std::string>> lines() const
+   {
+      std::vector<std::vector<std::string>> lines;
+      std::ifstream in(file);
+      for (std::string line; std::getline(in, line);)
+      {
+         std::istringstream fields(line);
+         auto& split = lines.emplace_back();
+         for (std::string field; fields >> field;)
+            split.push_back(field);
+      }
+      return lines;
+   }
+
+   std::filesystem::path file =
+      std::filesystem::temp_directory_path() /
+      std::format("http-probe-test-keylog-{}-{}", ::getpid(),
+                  testing::UnitTest::GetInstance()->current_test_info()->name());
+};
+
+} // namespace
+
+TEST_F(KeyLog, HasTheSecretsOfAnHttp3Connection)
+{
+   probe(config_with_keylog(h3_at(site.port())));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+
+   //
+   // What Wireshark needs for the traffic of TLS 1.3, which is all that QUIC speaks, all of one
+   // handshake and so with the same client random.
+   //
+   const auto logged = lines();
+   std::set<std::string> labels, randoms;
+   for (const auto& line : logged)
+   {
+      ASSERT_EQ(line.size(), 3u);
+      labels.insert(line[0]);
+      randoms.insert(line[1]);
+      EXPECT_EQ(line[1].size(), 64u) << "32 bytes in hex";
+   }
+   EXPECT_THAT(labels, Contains("CLIENT_HANDSHAKE_TRAFFIC_SECRET"));
+   EXPECT_THAT(labels, Contains("SERVER_HANDSHAKE_TRAFFIC_SECRET"));
+   EXPECT_THAT(labels, Contains("CLIENT_TRAFFIC_SECRET_0"));
+   EXPECT_THAT(labels, Contains("SERVER_TRAFFIC_SECRET_0"));
+   EXPECT_EQ(randoms.size(), 1u);
+
+   const auto permissions = std::filesystem::status(file).permissions();
+   EXPECT_EQ(permissions & std::filesystem::perms::all,
+             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write)
+      << "whoever can read it can read the traffic";
+}
+
+TEST_F(KeyLog, AppendsToWhatIsThere)
+{
+   std::ofstream(file) << "# an earlier run\n";
+   probe(config_with_keylog(h3_at(site.port())));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+   const auto logged = lines();
+   ASSERT_GT(logged.size(), 1u);
+   EXPECT_THAT(logged[0], ElementsAre("#", "an", "earlier", "run"));
+   EXPECT_EQ(logged[1].size(), 3u);
+}
+
+//
+// corosio's TLS stream does not hand out what a key log needs, and anyhttp goes on without one.
+// When that changes, so does this test, and the note in main.cpp with it.
+//
+TEST_F(KeyLog, HasNothingOfTlsOverTcp)
+{
+   probe(config_with_keylog(h2_at(site.port())));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_EQ(results[0].status, 200) << notes(results[0]);
+   EXPECT_EQ(results[0].route, std::format("h2 localhost:{}", site.port()));
+   EXPECT_TRUE(std::filesystem::exists(file));
+   EXPECT_THAT(lines(), IsEmpty());
+}
+
+TEST_F(KeyLog, RefusesOneThatCanNotBeWritten)
+{
+   auto configuration = config_with_keylog(h3_at(site.port()));
+   configuration.tls_keylog_file = "/nonexistent/keylog";
+   EXPECT_THROW(probe(std::move(configuration)), std::invalid_argument);
+   finish();
+   EXPECT_THAT(site.requests(), IsEmpty());
+}
+
+TEST_F(KeyLog, IsNotOpenedWithDnsOnly)
+{
+   auto configuration = config_with_keylog(h3_at(site.port()));
+   configuration.dns_only = true;
+   probe(std::move(configuration));
+
+   ASSERT_EQ(results.size(), 1u);
+   EXPECT_FALSE(std::filesystem::exists(file)) << "nothing to log, as nothing is connected to";
+}
+
 // =================================================================================================
 // What is counted
 // =================================================================================================
